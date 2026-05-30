@@ -1,0 +1,8 @@
+[book]
+title = "authbox"
+authors = ["anomalous254"]
+language = "en"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "rust"

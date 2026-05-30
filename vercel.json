@@ -1,0 +1,14 @@
+{
+  "builds": [
+    {
+      "src": "book/**",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/book/$1"
+    }
+  ]
+}
