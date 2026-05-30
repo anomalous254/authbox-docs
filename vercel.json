@@ -1,4 +1,4 @@
 {
-  "buildCommand": "mdbook build",
+  "buildCommand": "cargo install mdbook && mdbook build",
   "outputDirectory": "book"
 }
