@@ -59,6 +59,7 @@ auth.refresh_token(...)
 auth.verify_email(...)
 auth.request_password_reset(...)
 auth.reset_password(...)
+auth.is_token_valid(...) -> use this in your auth middleware functions to verify access tokens
 ```
 
 - These methods integrate all components automatically (user store, tokens, email, templates, etc.)

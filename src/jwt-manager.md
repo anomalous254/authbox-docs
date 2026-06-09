@@ -59,7 +59,7 @@ Returned tokens:
 pub struct AuthTokens {
     pub access_token: String,
     pub refresh_token: String,
-    pub expires_in: usize,
+    pub access_expires_at: i64,
     pub token_type: String,
 }
 ```

@@ -79,7 +79,7 @@ impl AuthUser for User {
 The login flow checks:
 
 ```rust
-store.is_email_verified(...)
+is_email_verified() -> bool
 ```
 
 before generating tokens.

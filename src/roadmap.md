@@ -11,9 +11,7 @@ The AuthBox roadmap outlines features and improvements planned for future releas
 - [x] One-time token support
 - [x] Pluggable storage backends
 - [x] Custom registration DTO support
-- [ ] Axum middleware
-- [ ] Actix middleware
-- [ ] Session management
+- [x] Middleware usage ready
 
 
 ## License

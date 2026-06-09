@@ -4,7 +4,7 @@
 
 It provides a complete authentication workflow while remaining fully framework-agnostic and storage-agnostic. Every major component is trait-driven, allowing applications to integrate their own databases, token systems, email providers, and storage backends.
 
-At the center of the library is `AuthService`, which orchestrates authentication operations such as registration, login, token refresh, email verification, and password recovery.
+At the center of the library is `AuthService`, which orchestrates authentication operations such as registration, login, token refresh, email verification, password recovery and is token valid.
 
 ---
 
@@ -132,24 +132,29 @@ Creates a new user account.
 pub async fn register(
     &mut self,
     input: S::RegisterDto,
-) -> Result<S::User, S::Error>
+) ->  Result<S::User, AuthError<S::Error, T::Error, B::Error>>
+
 ```
 
 ### What happens internally?
 
-1. Password is hashed.
-2. User is persisted through `UserStore`.
-3. A verification token is generated.
-4. The token is stored in `OneTimeTokenStore`.
-5. A verification email is generated.
-6. The email is sent through `EmailProvider`.
-7. The created user is returned.
+1. Check email if exists
+2. Password is hashed.
+3. User is persisted through `UserStore`.
+4. A email verification token is generated.
+5. The token is stored in `OneTimeTokenStore`.
+6. A verification email is generated.
+7. The email is sent through `EmailProvider`.
+8. The created user is returned.
 
 ### Flow
 
 ```text
 Register Request
         │
+        ▼
+Check if email already exists
+        │--- email exists --> EmailAlreadyExists  Error
         ▼
 Hash Password
         │
@@ -233,7 +238,7 @@ Rotates a refresh token and issues a new token pair.
 pub async fn refresh_token(
     &self,
     refresh_token: &str,
-) -> Result<T::Token, AuthError<T::Error, B::Error>>
+) -> Result<T::Token, AuthError<(), T::Error, B::Error>>
 ```
 
 ### What happens internally?
@@ -244,14 +249,26 @@ pub async fn refresh_token(
 4. Blacklist current refresh token.
 5. Generate new token pair.
 
+
 ### Possible Errors
 
+
 ```rust
-pub enum AuthError<T, B> {
+
+pub enum AuthError<S, T, B> {
+    Store(S),
     Token(T),
     Blacklist(B),
+
     BlacklistedToken,
+    EmailAlreadyExists,
+
+    NotFound,
+    InvalidToken,
+    EmailAlreadyVerified,
 }
+
+
 ```
 
 ### Refresh Flow
@@ -284,10 +301,7 @@ Return New Token Pair
 Marks a user's email address as verified.
 
 ```rust
-pub async fn verify_email(
-    &self,
-    token: &str,
-)
+pub async fn verify_email(&self, token: &str) -> Result<(), AuthError<S::Error, (), ()>>
 ```
 
 ### What happens internally?
@@ -315,6 +329,16 @@ Update User
          ▼
 Delete Token
 ```
+
+
+## Possible Errors
+```rust
+AuthError::InvalidToken
+AuthError::NotFound
+AuthError::Store
+AuthError::EmailAlreadyVerified
+```
+
 
 ---
 
@@ -359,10 +383,11 @@ Send Reset Email
 Updates a user's password using a reset token.
 
 ```rust
-pub async fn reset_password(
-    &self,
-    token: &str,
-    new_password: &str,
+  pub async fn reset_password(
+        &self,
+        token: &str,
+        new_password: &str,
+    ) -> Result<(), AuthError<S::Error, (), ()>>
 )
 ```
 
@@ -390,6 +415,56 @@ Update User
           │
           ▼
 Delete Token
+```
+
+
+## Possible Errors
+```rust
+AuthError::InvalidToken
+AuthError::NotFound
+AuthError::Store
+```
+
+---
+
+## is_token_valid()
+
+ Checks if access token is valid
+
+> 
+>  `is_token_valid()` should be used in your authentication middlewares to verify access token
+
+```rust
+   pub async fn is_token_valid(
+        &self,
+        token: &str,
+    ) -> Result<T::Claims, AuthError<(), T::Error, B::Error>>
+```
+
+### What happens internally?
+
+1. Validate access  token.
+2. Check token if blaclisted
+3. Returns token claims
+
+### Flow
+
+```text
+Validate Access Token
+          │
+          ▼
+Check  token blacklisted
+          │
+          ▼
+Returns token claims
+```
+
+
+## Possible Errors
+```rust
+AuthError::Token
+AuthError::Blacklist
+AuthError::BlacklistedToken
 ```
 
 ---
@@ -423,10 +498,18 @@ pub enum LoginError<T, S> {
 Returned by `refresh_token()`.
 
 ```rust
-pub enum AuthError<T, B> {
+#[derive(Debug)]
+pub enum AuthError<S, T, B> {
+    Store(S),
     Token(T),
     Blacklist(B),
+
     BlacklistedToken,
+    EmailAlreadyExists,
+
+    NotFound,
+    InvalidToken,
+    EmailAlreadyVerified,
 }
 ```
 
@@ -435,7 +518,11 @@ pub enum AuthError<T, B> {
 | `Token(T)` | Token verification or refresh failure |
 | `Blacklist(B)` | Blacklist store failure |
 | `BlacklistedToken` | Refresh token has already been revoked |
-
+| `Store(S)` | Database store implementation erros |
+| `EmailAlreadyExists` | Email already exists |
+| `NotFound` | User not found |
+| `InvalidToken` | OTT  for blacklists has already been revoked |
+| `EmailAlreadyVerified` | User email already verified |
 ---
 
 # Security Features

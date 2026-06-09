@@ -53,7 +53,7 @@ pub trait UserStore {
         user_id: &str,
     ) -> Result<(), Self::Error>;
 
-    async fn is_email_verified(
+    async fn check_email_verified(
         &self,
         user_id: &str,
     ) -> Result<bool, Self::Error>;
@@ -206,12 +206,12 @@ Ok(())
 when the operation succeeds.
 
 
-## `is_email_verified`
+## `check_email_verified`
 
 Checks whether a user has verified their email address.
 
 ```rust
-async fn is_email_verified(
+async fn check_email_verified(
     &self,
     user_id: &str,
 ) -> Result<bool, Self::Error>;
@@ -322,7 +322,7 @@ impl UserStore for UserStoreImpl {
         Ok(())
     }
 
-    async fn is_email_verified(
+    async fn check_email_verified(
         &self,
         user_id: &str,
     ) -> Result<bool, Self::Error> {
