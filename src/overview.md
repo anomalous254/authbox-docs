@@ -230,6 +230,52 @@ Return Tokens
 
 ---
 
+## logout()
+
+
+Invalidate your refresh token and log the user out.
+
+
+```rust
+ pub async fn logout(
+        &self,
+        refresh_token: &str,
+    ) -> Result<(), AuthError<(), T::Error, B::Error, ()>>
+
+```
+
+### What happens internally?
+
+1. Verify refresh token.
+2. Extract token claims.
+3. Blacklist current refresh token.
+
+
+### Refresh Flow
+
+```text
+Verify Refresh Token
+          │
+          ▼
+Check Blacklist
+          │
+          ├── Blacklisted
+          │         │
+          │         ▼
+          │   BlacklistedToken
+          │
+          ▼
+Blacklist Current Token
+          │
+          ▼
+Generate New Tokens
+          │
+          ▼
+Return New Token Pair
+```
+
+---
+
 ## refresh_token()
 
 Rotates a refresh token and issues a new token pair.
@@ -347,10 +393,10 @@ AuthError::EmailAlreadyVerified
 Starts the password reset process.
 
 ```rust
-pub async fn request_password_reset(
-    &self,
-    email: &str,
-)
+  pub async fn request_password_reset(
+        &self,
+        email: &str,
+    ) -> Result<(), AuthError<S::Error, (), (), V::Error>>
 ```
 
 ### What happens internally?
@@ -499,10 +545,11 @@ Returned by `refresh_token()`.
 
 ```rust
 #[derive(Debug)]
-pub enum AuthError<S, T, B> {
+pub enum AuthError<S, T, B, O> {
     Store(S),
     Token(T),
     Blacklist(B),
+    Ott(O),
 
     BlacklistedToken,
     EmailAlreadyExists,
@@ -517,6 +564,7 @@ pub enum AuthError<S, T, B> {
 |----------|-------------|
 | `Token(T)` | Token verification or refresh failure |
 | `Blacklist(B)` | Blacklist store failure |
+| `Ott(O)` | One Time Token store failure |
 | `BlacklistedToken` | Refresh token has already been revoked |
 | `Store(S)` | Database store implementation erros |
 | `EmailAlreadyExists` | Email already exists |

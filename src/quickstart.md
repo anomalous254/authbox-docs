@@ -64,15 +64,29 @@ impl AuthUser for User {
 Build the service:
 
 ```rust
-let auth = AuthService::builder()
-    .store(UserStoreImpl::new())
-    .hasher(DefaultHasher)
-    .tokens(DefaultJwtManager::new("secret"))
-    .blacklist(MemoryBlacklistStore::new())
-    .email_sender(MockEmailSender)
-    .email_templates(MockTemplates)
-    .ott_store(MemoryOttStore::new())
-    .build();
+pub type TestAuthService = AuthService<
+    TestStore,
+    DefaultHasher,
+    DefaultJwtManager,
+    RedisBlacklistStore,
+    MockEmailSender,
+    MockTemplates,
+    RedisOttStore,
+>;
+
+pub fn build_test_auth() -> TestAuthService {
+    let client = redis::Client::open("redis://127.0.0.1/").expect("failed to connect to redis");
+
+    AuthService::builder()
+        .store(TestStore::new())
+        .hasher(DefaultHasher)
+        .tokens(DefaultJwtManager::new("secret"))
+        .blacklist(RedisBlacklistStore::new(client.clone()))
+        .email_sender(MockEmailSender)
+        .email_templates(MockTemplates)
+        .ott_store(RedisOttStore::new(client))
+        .build()
+}
 ```
 
 Register:

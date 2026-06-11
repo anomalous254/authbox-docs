@@ -2,11 +2,11 @@
 
 Refresh token rotation requires a blacklist store.
 
-The blacklist prevents reuse of previously rotated refresh tokens, ensuring that old refresh tokens cannot be reused after rotation.
+The blacklist ensures that **rotated refresh tokens cannot be reused**, preventing token replay attacks.
 
 ---
 
-## Why It Exists
+## How It Works
 
 When a refresh token is exchanged:
 
@@ -14,8 +14,30 @@ When a refresh token is exchanged:
 2. The current token is blacklisted.
 3. A new token pair (access + refresh) is generated.
 
-The original token can never be used again, improving security against token replay attacks.
+The original token is invalidated immediately and can never be used again.
 
+---
+
+## Built-in RedisBlacklistStore
+
+AuthBox ships with a built-in Redis implementation of `TokenBlacklistStore`.
+
+```rust
+let client = redis::Client::open("redis://127.0.0.1/")?;
+
+let blacklist = RedisBlacklistStore::new(client);
+```
+
+### Why Redis?
+
+- Production-ready
+- Automatically expires blacklisted tokens using Redis TTL
+- Works across multiple application instances
+- No manual cleanup required
+
+The blacklist entry is stored until the refresh token's expiration time, after which Redis automatically removes it.
+
+---
 
 ## TokenBlacklistStore Trait
 
@@ -39,70 +61,157 @@ pub trait TokenBlacklistStore {
 }
 ```
 
-- `is_blacklisted(jti)` checks if a token ID has already been used.
-- `blacklist_token(jti, expires_at)` adds a token to the blacklist.
+### Methods
 
+#### `is_blacklisted(jti)`
 
-## Recommended Backends
+Checks whether a token identifier has already been blacklisted.
 
-**Production:**  
+```rust
+let blacklisted = store.is_blacklisted(jti).await?;
+```
 
-- Redis  
-- SQL/NoSQL databases  
+#### `blacklist_token(jti, expires_at)`
 
-**Testing / Development:**  
+Adds a token identifier to the blacklist until its expiration time.
 
-- In-memory storage using a `HashSet`  
+```rust
+store
+    .blacklist_token(jti, expires_at)
+    .await?;
+```
 
+---
 
-## Example: In-Memory Blacklist Store
+## Default Redis Implementation
+
+AuthBox includes the following implementation:
 
 ```rust
 use async_trait::async_trait;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use authbox_core::traits::TokenBlacklistStore;
+use redis::AsyncCommands;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
-pub struct MemoryBlacklistStore {
-    pub tokens: Arc<Mutex<HashSet<String>>>,
+pub struct RedisBlacklistStore {
+    pub client: redis::Client,
 }
 
-impl MemoryBlacklistStore {
-    pub fn new() -> Self {
-        Self {
-            tokens: Arc::new(Mutex::new(HashSet::new())),
-        }
+impl RedisBlacklistStore {
+    pub fn new(client: redis::Client) -> Self {
+        Self { client }
     }
 }
 
 #[derive(Debug)]
-pub struct BlacklistError;
+pub enum RedisBlacklistError {
+    Redis(redis::RedisError),
+}
 
 #[async_trait]
-impl TokenBlacklistStore for MemoryBlacklistStore {
-    type Error = BlacklistError;
+impl TokenBlacklistStore for RedisBlacklistStore {
+    type Error = RedisBlacklistError;
 
     async fn is_blacklisted(&self, jti: &str) -> Result<bool, Self::Error> {
-        let store = self.tokens.lock().unwrap();
-        Ok(store.contains(jti))
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(RedisBlacklistError::Redis)?;
+
+        let exists: bool = conn
+            .exists(jti)
+            .await
+            .map_err(RedisBlacklistError::Redis)?;
+
+        Ok(exists)
     }
 
-    async fn blacklist_token(&self, jti: &str, _expires_at: i64) -> Result<bool, Self::Error> {
-        let mut store = self.tokens.lock().unwrap();
-        store.insert(jti.to_string());
+    async fn blacklist_token(
+        &self,
+        jti: &str,
+        expires_at: i64,
+    ) -> Result<bool, Self::Error> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        if expires_at <= now {
+            return Ok(true);
+        }
+
+        let ttl = (expires_at - now) as u64;
+
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(RedisBlacklistError::Redis)?;
+
+        let _: () = conn
+            .set_ex(jti, "1", ttl)
+            .await
+            .map_err(RedisBlacklistError::Redis)?;
+
         Ok(true)
     }
 }
 ```
 
-- The in-memory store is suitable for testing or small-scale apps.  
-- In production, use a persistent and distributed store like Redis to share blacklist data across multiple servers.
+---
+
+## Using RedisBlacklistStore
+
+```rust
+pub type TestAuthService = AuthService<
+    TestStore,
+    DefaultHasher,
+    DefaultJwtManager,
+    RedisBlacklistStore,
+    MockEmailSender,
+    MockTemplates,
+    RedisOttStore,
+>;
+
+pub fn build_test_auth() -> TestAuthService {
+    let client = redis::Client::open("redis://127.0.0.1/")
+        .expect("failed to connect to redis");
+
+    AuthService::builder()
+        .store(TestStore::new())
+        .hasher(DefaultHasher)
+        .tokens(DefaultJwtManager::new("secret"))
+        .blacklist(RedisBlacklistStore::new(client.clone()))
+        .email_sender(MockEmailSender)
+        .email_templates(MockTemplates)
+        .ott_store(RedisOttStore::new(client))
+        .build()
+}
+```
+
+---
+
+## Custom Implementations
+
+You can provide your own blacklist backend by implementing `TokenBlacklistStore`.
+
+Common choices include:
+
+- Redis
+- PostgreSQL
+- MySQL
+- MongoDB
+- DynamoDB
+- In-memory `HashSet` (testing only)
 
 ---
 
 ## Summary
 
-- Token blacklisting ensures **rotated refresh tokens cannot be reused**.  
-- Implement `TokenBlacklistStore` for custom storage.  
-- Built-in in-memory implementation is provided for quick testing.  
-- Production apps should use a distributed persistent store like Redis.
+- Refresh token rotation requires token blacklisting.
+- AuthBox includes a built-in `RedisBlacklistStore`.
+- Blacklisted tokens are automatically removed when they expire.
+- Custom blacklist backends can be implemented through `TokenBlacklistStore`.
+- Redis is the recommended choice for production deployments.
