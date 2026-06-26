@@ -40,7 +40,7 @@ let tokens = DefaultJwtManager::new("super-secret-key");
 
 - Generates **access** and **refresh** tokens
 - Access tokens expire after 15 minutes
-- Refresh tokens expire after 7 days
+- Refresh tokens expire after 1 day
 - Tokens use the standard `Bearer` type
 - Supports token blacklisting
 

@@ -2,36 +2,38 @@
 
 > **Note**
 >
-> This quick start is intended to demonstrate the overall authentication workflow.
-> Some code has been omitted for brevity. Refer to the next chapters for complete implementations and production-ready examples.
+> This quick start demonstrates the overall authentication workflow using the built-in `SmtpEmailProvider`.
+> Some implementation details have been omitted for brevity. The following chapters cover complete implementations for the user store, email templates, and production-ready configuration.
 
-This example shows:
+This example walks through:
 
-1. Create a user type
-2. Create a store
-3. Configure authentication
-4. Register a user
-5. Login
-6. Refresh tokens
+1. Creating a user type
+2. Implementing `AuthUser`
+3. Building an `AuthService`
+4. Registering a user
+5. Logging in
+6. Refreshing an access token
+
+---
 
 ## User
 
 ```rust
 #[derive(Clone, Debug)]
 pub struct User {
-    // Required fileds
+    // Required fields
     pub id: String,
     pub email: String,
     pub password_hash: String,
     pub is_email_verified: bool,
 
-    // Your custom fileds
-    pub username : String,
+    // Your application fields
+    pub username: String,
     pub location: String,
-    ...
-    
 }
 ```
+
+Implement the `AuthUser` trait:
 
 ```rust
 impl AuthUser for User {
@@ -61,7 +63,9 @@ impl AuthUser for User {
 }
 ```
 
-Build the service:
+---
+
+## Build the AuthService
 
 ```rust
 pub type TestAuthService = AuthService<
@@ -69,33 +73,54 @@ pub type TestAuthService = AuthService<
     DefaultHasher,
     DefaultJwtManager,
     RedisBlacklistStore,
-    MockEmailSender,
+    SmtpEmailProvider,
     MockTemplates,
     RedisOttStore,
 >;
 
 pub fn build_test_auth() -> TestAuthService {
-    let client = redis::Client::open("redis://127.0.0.1/").expect("failed to connect to redis");
+    let client = redis::Client::open("redis://127.0.0.1/")
+        .expect("failed to connect to redis");
 
     AuthService::builder()
         .store(TestStore::new())
         .hasher(DefaultHasher)
         .tokens(DefaultJwtManager::new("secret"))
         .blacklist(RedisBlacklistStore::new(client.clone()))
-        .email_sender(MockEmailSender)
+        .email_sender(smtp_email_provider())
         .email_templates(MockTemplates)
         .ott_store(RedisOttStore::new(client))
         .build()
 }
 ```
 
-Register:
+The `smtp_email_provider()` function creates a `SmtpEmailProvider` using the following environment variables:
+
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_USERNAME=your-email@gmail.com
+SMTP_PASSWORD=your-app-password
+SMTP_FROM_EMAIL=AuthBox <your-email@gmail.com>
+```
+
+---
+
+## Register a User
 
 ```rust
 let user = auth.register(dto).await?;
 ```
 
-Login:
+Registering a user will:
+
+- Create the account
+- Hash the password
+- Generate an email verification token
+- Send a verification email using the configured `SmtpEmailProvider`
+
+---
+
+## Login
 
 ```rust
 let tokens = auth
@@ -103,12 +128,29 @@ let tokens = auth
     .await?;
 ```
 
-Refresh:
+On success, AuthBox returns an access token and a refresh token.
+
+---
+
+## Refresh Tokens
 
 ```rust
 let refreshed = auth
-    .refresh_token(
-        &tokens.refresh_token
-    )
+    .refresh_token(&tokens.refresh_token)
     .await?;
 ```
+
+A new access token (and refresh token, if rotation is enabled) is generated while the previous refresh token is revoked.
+
+---
+
+## Next Steps
+
+The following chapters explain how to customize:
+
+- `UserStore`
+- `EmailTemplateConfig`
+- `SmtpEmailProvider`
+- JWT configuration
+- One-time token storage
+- Redis integration

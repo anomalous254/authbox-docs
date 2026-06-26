@@ -1,66 +1,121 @@
 # Building the Auth Service
 
-After configuring all the components, they can be assembled into an `AuthService`.
+After configuring all required components, assemble them into an `AuthService`.
 
-The `AuthService` is the **main entry point** into AuthBox and provides all authentication functionality.
+The `AuthService` is the **main entry point** into AuthBox and coordinates authentication, email delivery, token management, and user persistence.
 
 ---
 
-## Service Components
+## Required Components
 
-An `AuthService` requires the following pluggable components:
+An `AuthService` is built from the following pluggable components:
 
-- `UserStore` – persistence for user accounts  
-- `PasswordHasher` – for hashing and verifying passwords  
-- `TokenManager` – for access and refresh tokens  
-- `TokenBlacklistStore` – for managing blacklisted refresh tokens  
-- `EmailProvider` – for sending emails  
-- `EmailTemplateConfig` – for generating email subjects and bodies  
-- `OneTimeTokenStore` – for temporary tokens (email verification, password reset, magic links)
+- `UserStore` — persistence layer for user accounts
+- `PasswordHasher` — hashes and verifies passwords
+- `TokenManager` — creates and validates access/refresh tokens
+- `TokenBlacklistStore` — stores revoked refresh tokens
+- `EmailProvider` — sends authentication emails
+- `EmailTemplateConfig` — generates email subjects and bodies
+- `OneTimeTokenStore` — stores temporary tokens for email verification, password resets, and magic links
+
+Each component can be replaced with your own implementation.
 
 ---
 
 ## Building an AuthService
 
+The example below uses:
+
+- `TestStore`
+- `DefaultHasher`
+- `DefaultJwtManager`
+- `RedisBlacklistStore`
+- `SmtpEmailProvider`
+- `MockTemplates`
+- `RedisOttStore`
+
 ```rust
+use authbox::prelude::*;
+
+let client = redis::Client::open("redis://127.0.0.1/")
+    .expect("failed to connect to redis");
+
 let auth = AuthService::builder()
-    .store(UserStoreImpl::new())
+    .store(TestStore::new())
     .hasher(DefaultHasher)
     .tokens(DefaultJwtManager::new("secret"))
-    .blacklist(MemoryBlacklistStore::new())
-    .email_sender(MockEmailSender)
+    .blacklist(RedisBlacklistStore::new(client.clone()))
+    .email_sender(smtp_email_provider())
     .email_templates(MockTemplates)
-    .ott_store(MemoryOttStore::new())
+    .ott_store(RedisOttStore::new(client))
     .build();
 ```
 
-- Each component is pluggable and can be replaced with a custom implementation.  
-- This ensures the AuthBox service is **flexible** and backend-agnostic.
+---
+
+## SMTP Configuration
+
+The SMTP provider can be created from environment variables.
+
+```rust
+use std::env;
+use authbox::prelude::SmtpEmailProvider;
+
+pub fn smtp_email_provider() -> SmtpEmailProvider {
+    let host = env::var("SMTP_HOST")
+        .expect("SMTP_HOST missing");
+
+    let username = env::var("SMTP_USERNAME")
+        .expect("SMTP_USERNAME missing");
+
+    let password = env::var("SMTP_PASSWORD")
+        .expect("SMTP_PASSWORD missing");
+
+    let from_email = env::var("SMTP_FROM_EMAIL")
+        .expect("SMTP_FROM_EMAIL missing");
+
+    SmtpEmailProvider::new(
+        &host,
+        &username,
+        &password,
+        &from_email,
+    )
+}
+```
+
+Example environment variables:
+
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_USERNAME=your-email@gmail.com
+SMTP_PASSWORD=your-app-password
+SMTP_FROM_EMAIL=AuthBox <your-email@gmail.com>
+```
+
+> **Note:** For Gmail, use an App Password instead of your account password.
 
 ---
 
 ## Available Operations
 
-After constructing the service, it exposes methods for the complete authentication workflow:
+Once constructed, `AuthService` provides the complete authentication workflow.
 
 ```rust
-auth.register(...);
-auth.login(...);
-auth.logout(...);
-auth.refresh_token(...);
-auth.verify_email(...);
-auth.request_password_reset(...);
-auth.reset_password(...);
-auth.is_token_valid(...); // use in auth middleware to verify access tokens
+auth.register(...).await?;
+auth.login(...).await?;
+auth.logout(...).await?;
+auth.refresh_token(...).await?;
+auth.verify_email(...).await?;
+auth.request_password_reset(...).await?;
+auth.reset_password(...).await?;
+auth.is_token_valid(...).await?;
 ```
 
-- These methods integrate all components automatically (user store, tokens, email, templates, etc.).
+These methods automatically coordinate the configured storage, password hashing, token management, one-time tokens, email templates, and email provider.
 
 ---
 
-## Example: Test AuthService
-
-You can build a test instance using Redis, in-memory, and mock components:
+## Example Service Type
 
 ```rust
 pub type TestAuthService = AuthService<
@@ -68,11 +123,17 @@ pub type TestAuthService = AuthService<
     DefaultHasher,
     DefaultJwtManager,
     RedisBlacklistStore,
-    MockEmailSender,
+    SmtpEmailProvider,
     MockTemplates,
     RedisOttStore,
 >;
+```
 
+---
+
+## Complete Builder Example
+
+```rust
 pub fn build_test_auth() -> TestAuthService {
     let client = redis::Client::open("redis://127.0.0.1/")
         .expect("failed to connect to redis");
@@ -82,21 +143,19 @@ pub fn build_test_auth() -> TestAuthService {
         .hasher(DefaultHasher)
         .tokens(DefaultJwtManager::new("secret"))
         .blacklist(RedisBlacklistStore::new(client.clone()))
-        .email_sender(MockEmailSender)
+        .email_sender(smtp_email_provider())
         .email_templates(MockTemplates)
         .ott_store(RedisOttStore::new(client))
         .build()
 }
 ```
 
-- Ideal for **unit testing** or **local development**.  
-- External dependencies are minimized; storage and email operations are handled by in-memory or mock components.
-
 ---
 
 ## Summary
 
-- `AuthService` is the **central interface** for AuthBox.  
-- All components are **fully pluggable**, allowing complete customization.  
-- Supports registration, login, email verification, password resets, token rotation, and one-time authentication flows.  
-- Testable with mock and in-memory implementations for fast local development.
+- `AuthService` is the central interface for AuthBox.
+- Every dependency is pluggable and can be replaced with your own implementation.
+- SMTP, SendGrid, and Resend providers can be used interchangeably through the `EmailProvider` abstraction.
+- Authentication workflows automatically integrate storage, hashing, JWTs, email delivery, templates, and one-time tokens.
+- The builder pattern makes it easy to switch implementations for development, testing, and production.

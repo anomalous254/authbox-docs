@@ -1,26 +1,62 @@
 # Configuring Email Delivery
 
-AuthBox sends emails using the `EmailProvider` trait.  
+AuthBox sends emails through the `EmailProvider` trait.
 
-The framework is **provider-agnostic** and does not depend on a specific email service.
+The system is **provider-agnostic**, meaning you can:
+
+- Use built-in providers for quick setup
+- Implement your own custom provider
+- Integrate with any email service
+
+AuthBox does not depend on any specific email provider.
 
 ---
 
-## Supported Providers
+## Quick Start (Built-in Providers)
 
-Common providers you can integrate with:
+AuthBox includes ready-to-use providers for common email services.
 
-- SendGrid
-- Resend
-- Mailgun
-- AWS SES
-- SMTP
-- Custom providers
+### SendGrid
 
+```rust
+use authbox::prelude::SendGridEmailProvider;
 
-## EmailProvider Trait
+let provider = SendGridEmailProvider::new(
+    std::env::var("SENDGRID_API_KEY").unwrap(),
+    std::env::var("SENDGRID_FROM_EMAIL").unwrap(),
+    std::env::var("SENDGRID_FROM_NAME").unwrap(),
+);
+```
 
-To send emails, implement the following trait:
+### Resend
+
+```rust
+use authbox::prelude::ResendEmailProvider;
+
+let provider = ResendEmailProvider::new(
+    std::env::var("RESEND_API_KEY").unwrap(),
+    std::env::var("RESEND_FROM_EMAIL").unwrap(),
+);
+```
+
+### SMTP
+
+```rust
+use authbox::prelude::SmtpEmailProvider;
+
+let provider = SmtpEmailProvider::new(
+    &std::env::var("SMTP_HOST").unwrap(),
+    &std::env::var("SMTP_USERNAME").unwrap(),
+    &std::env::var("SMTP_PASSWORD").unwrap(),
+    &std::env::var("SMTP_FROM_EMAIL").unwrap(),
+);
+```
+
+---
+
+## The `EmailProvider` Trait
+
+All email providers implement the same interface:
 
 ```rust
 use async_trait::async_trait;
@@ -38,37 +74,63 @@ pub trait EmailProvider {
 }
 ```
 
-## Used By AuthBox
+This abstraction allows AuthBox to remain fully decoupled from any email service.
 
-AuthBox sends emails for workflows such as:
+---
 
-- Email verification
-- Password reset
-- One-time authentication links (magic links)
+## Creating a Custom Email Provider
 
+You can integrate any email service by implementing the `EmailProvider` trait.
 
-## Example: Mock Email Sender
-
-For development or testing, you can implement a simple mock provider:
+### Example
 
 ```rust
 use async_trait::async_trait;
+use authbox::email::EmailProvider;
 
-#[derive(Clone)]
-pub struct MockEmailSender;
+pub struct MyEmailProvider;
 
 #[async_trait]
-impl EmailProvider for MockEmailSender {
+impl EmailProvider for MyEmailProvider {
+    type Error = std::io::Error;
+
+    async fn send_email(
+        &self,
+        to: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<(), Self::Error> {
+        println!("Sending email to {to}: {subject}");
+        Ok(())
+    }
+}
+```
+
+---
+
+## Mock Provider (Testing & Development)
+
+For local development and testing, you can use a mock provider that prints emails to the console.
+
+```rust
+use async_trait::async_trait;
+use authbox::email::EmailProvider;
+
+#[derive(Clone)]
+pub struct MockEmailProvider;
+
+#[async_trait]
+impl EmailProvider for MockEmailProvider {
     type Error = ();
 
     async fn send_email(
-           &self,
+        &self,
         to: &str,
         subject: &str,
         body: &str,
     ) -> Result<(), Self::Error> {
         println!(
-            "\nEMAIL TO: {}\nSUBJECT: {}\nBODY: {}",
+            "EMAIL TO: {}\nSUBJECT: {}\nBODY: {}",
             to, subject, body
         );
 
@@ -77,25 +139,23 @@ impl EmailProvider for MockEmailSender {
 }
 ```
 
-- This prints emails to the console instead of sending them.  
-- Useful for local development and automated tests.  
+---
 
+## Usage in AuthBox
 
-## Production Email Providers
+Email providers are used throughout AuthBox for:
 
-For production, implement the trait using real email services like:
-
-- SendGrid
-- Mailgun
-- AWS SES
-- SMTP servers
-
-This allows AuthBox to send actual email messages without changing the core logic.
+- Email verification
+- Password reset emails
+- Magic login links
+- Account notifications
 
 ---
 
 ## Summary
 
-- `EmailProvider` is a pluggable interface for sending emails.  
-- You can implement a mock provider for testing or integrate a real provider for production.  
-- AuthBox uses email for verification, password reset, and other authentication flows.
+- `EmailProvider` is a pluggable abstraction for email delivery.
+- Built-in providers are available for SendGrid, Resend, and SMTP.
+- You can integrate any email service by implementing the `EmailProvider` trait.
+- Mock providers make local development and testing straightforward.
+- AuthBox remains completely independent of any specific email service.
