@@ -6,55 +6,81 @@
 
 A lightweight, modular, async-first authentication framework for Rust.
 
-`authbox` provides a flexible authentication system built around traits, pluggable components, and Tokio-ready async APIs.
+authbox is built around traits and pluggable components, so you keep your own database, cache and web framework. It handles the authentication logic for you.
 
-It is designed for applications that need customizable authentication logic without being locked into a specific database, framework, or storage backend.
+Full guides and examples: [AuthBox Docs](https://authbox-docs.vercel.app/)
 
----
+## Installation
 
-# Features
+```bash
+cargo add authbox
+```
 
-- Secure password hashing with Argon2
-- JWT access + refresh token authentication
-- Refresh token rotation
-- Refresh token revocation / blacklisting
-- Email verification flow
-- Password reset flow
-- One-time token (OTT) support
-- Fully async (`tokio`)
-- Trait-driven architecture
-- Pluggable storage backends
-- Framework agnostic
-- Test-friendly design
-- Builder API for ergonomic setup
-- Custom registration DTO support
-
-> 1. Unlike full authentication platforms, `authbox` does not require a specific:
->    - Database
->    - ORM
->    - Web framework
->
-> 2. It works with:
->    - Axum
->    - Actix
->    - Warp
->    - Rocket
->    - Custom applications
+## Features
+ 
+* Argon2 password hashing, run on blocking threads so it never stalls the async runtime
+* JWT access and refresh tokens
+* Refresh token rotation (each refresh token can be used once)
+* Refresh token revocation and blacklisting
+* Session revocation: invalidate every token a user has issued so far
+* Email verification flow
+* Password reset flow with 15 minute reset tokens
+* Change password for logged in users
+* Account deletion with password confirmation
+* Logout from a single device or from all devices
+* One-time token (OTT) support with atomic claim, so a token cannot be used twice
+* Optional user cache for the `me` lookup, with a default in-memory implementation (moka) and a `UserCache` trait for your own, plus hit and miss metrics
+* Custom registration DTO support for extra profile fields
+* Pluggable storage backends
+* Framework agnostic
+* Fully async (`tokio`)
+* Builder API for ergonomic setup
+* Test friendly design, with in-memory fixtures
 
 
-# Support the Project
+## Quick start
 
-If AuthBox helps you build applications faster, consider supporting its development.
+```rust
+use authbox::prelude::*;
 
-Your support helps fund:
+let client = redis::Client::open("redis://127.0.0.1/")?;
 
-- New features
-- Documentation improvements
-- Bug fixes and maintenance
-- Long-term project sustainability
+let auth = AuthService::builder()
+    .store(MyUserStore::new())                 // your database, implements UserStore
+    .hasher(DefaultHasher)
+    .tokens(DefaultJwtManager::new("a-secret-at-least-32-bytes-long!!", None, None)?)
+    .blacklist(RedisBlacklistStore::new(client.clone()).await?)
+    .email_sender(resend_email_provider())
+    .email_templates(MyTemplates)              // implements EmailTemplateConfig
+    .ott_store(RedisOttStore::new(client))
+    .user_cache(DefaultMemoryUserCache::default()) // optional
+    .build()?;
 
-❤️ Ko-fi: [https://ko-fi.com/nyando](https://ko-fi.com/nyando)
+auth.register(&dto).await?;                            // sends a verification email
+auth.verify_email(&token).await?;
+let pair = auth.login("user@example.com", "a-long-password").await?;
+let me = auth.me(&pair.access_token).await?;
+let pair = auth.refresh_token(&pair.refresh_token).await?;
+auth.logout(&pair.refresh_token).await?;
+```
 
-Every contribution, no matter the size, is greatly appreciated.
+Other methods: `is_token_valid`, `request_password_reset`, `reset_password`, `change_password`, `logout_all`, `delete_account` and `invalidate_user_cache`.
 
-Thank you for supporting open-source software!
+In your auth middleware, call `is_token_valid()` to protect routes. For a complete Actix Web setup, check the `examples` directory.
+
+## Things to know
+
+* Passwords must be 12 to 128 characters.
+* Password reset, password change, account deletion and `logout_all` revoke every existing session.
+* Your database needs a UNIQUE index on the email column.
+* Always take `user_id` from validated claims, never from request input.
+
+## Support the project
+
+If authbox saves you time, you can support its development on Ko-fi. It helps fund new features, documentation and maintenance.
+
+[https://ko-fi.com/nyando](https://ko-fi.com/nyando)
+
+## License
+
+Apache-2.0

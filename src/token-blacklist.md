@@ -1,217 +1,88 @@
 # Configuring Token Blacklisting
 
-Refresh token rotation requires a blacklist store.
+The blacklist is what makes revocation work. It does two jobs:
 
-The blacklist ensures that **rotated refresh tokens cannot be reused**, preventing token replay attacks.
+1. **Single token revocation.** A rotated or logged out refresh token can never be used again.
+2. **Session revocation.** Every token a user has issued up to a certain moment can be voided at once.
 
 ---
 
-## How It Works
+## How rotation uses it
 
 When a refresh token is exchanged:
 
-1. The current token is verified.
-2. The current token is blacklisted.
-3. A new token pair (access + refresh) is generated.
+1. The token is verified, and checked against the blacklist.
+2. The token is blacklisted.
+3. A new token pair is generated.
 
-The original token is invalidated immediately and can never be used again.
-
----
+`blacklist_token` reports whether the token was newly blacklisted. If it was already there, another request got to it first and the exchange fails with `BlacklistedToken`. This stops two requests from rotating the same token.
 
 ## Built-in RedisBlacklistStore
-
-AuthBox ships with a built-in Redis implementation of `TokenBlacklistStore`.
 
 ```rust
 let client = redis::Client::open("redis://127.0.0.1/")?;
 
-let blacklist = RedisBlacklistStore::new(client);
+let blacklist = RedisBlacklistStore::new(client).await?;
 ```
 
-### Why Redis?
+Note the `.await?`. The Redis store is created asynchronously.
 
-- Production-ready
-- Automatically expires blacklisted tokens using Redis TTL
-- Works across multiple application instances
-- No manual cleanup required
+Why Redis:
 
-The blacklist entry is stored until the refresh token's expiration time, after which Redis automatically removes it.
+* Production ready
+* Entries expire on their own through Redis TTL
+* Shared across all your application instances
+* No cleanup jobs
 
----
-
-## TokenBlacklistStore Trait
+## The trait
 
 ```rust
-use async_trait::async_trait;
-
 #[async_trait]
-pub trait TokenBlacklistStore {
-    type Error;
+pub trait TokenBlacklistStore: Send + Sync {
+    async fn is_blacklisted(&self, jti: &str) -> Result<bool, BoxError>;
+    async fn blacklist_token(&self, jti: &str, expires_at: i64) -> Result<bool, BoxError>;
 
-    async fn is_blacklisted(
+    /// "Every token for this user issued at or before `cutoff` is void."
+    /// The note can be deleted after `ttl_seconds`.
+    async fn revoke_user_sessions(
         &self,
-        jti: &str,
-    ) -> Result<bool, Self::Error>;
+        user_id: &str,
+        cutoff: i64,
+        ttl_seconds: u64,
+    ) -> Result<(), BoxError>;
 
-    async fn blacklist_token(
-        &self,
-        jti: &str,
-        expires_at: i64,
-    ) -> Result<bool, Self::Error>;
+    /// Read the note back. None means no sessions have been revoked.
+    async fn sessions_revoked_before(&self, user_id: &str) -> Result<Option<i64>, BoxError>;
 }
 ```
 
 ### Methods
 
-#### `is_blacklisted(jti)`
+**`is_blacklisted(jti)`** returns whether a token id has been blacklisted.
 
-Checks whether a token identifier has already been blacklisted.
+**`blacklist_token(jti, expires_at)`** blacklists a token until it would have expired anyway. Return `true` when the token was newly blacklisted and `false` when it was already there.
 
-```rust
-let blacklisted = store.is_blacklisted(jti).await?;
-```
+**`revoke_user_sessions(user_id, cutoff, ttl_seconds)`** stores a cutoff time for a user. authbox passes the current time in unix seconds as `cutoff`, and the refresh token lifetime as `ttl_seconds`. After that long, every older token has expired on its own, so the note can be dropped.
 
-#### `blacklist_token(jti, expires_at)`
+**`sessions_revoked_before(user_id)`** returns the stored cutoff, or `None` when there is none.
 
-Adds a token identifier to the blacklist until its expiration time.
+## How checks work
 
-```rust
-store
-    .blacklist_token(jti, expires_at)
-    .await?;
-```
+Every call to `is_token_valid` and `refresh_token` runs these checks:
 
----
+1. The signature and expiry are valid.
+2. The token type is the expected one.
+3. The token id is not blacklisted.
+4. The token was not issued at or before the user's session cutoff.
 
-## Default Redis Implementation
+## Custom implementations
 
-AuthBox includes the following implementation:
+Implement `TokenBlacklistStore` to use another backend, such as PostgreSQL, MySQL, MongoDB or DynamoDB. An in-memory map is fine for tests, but it will not be shared between instances.
 
-```rust
-use async_trait::async_trait;
-use authbox_core::traits::TokenBlacklistStore;
-use redis::AsyncCommands;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-#[derive(Clone)]
-pub struct RedisBlacklistStore {
-    pub client: redis::Client,
-}
-
-impl RedisBlacklistStore {
-    pub fn new(client: redis::Client) -> Self {
-        Self { client }
-    }
-}
-
-#[derive(Debug)]
-pub enum RedisBlacklistError {
-    Redis(redis::RedisError),
-}
-
-#[async_trait]
-impl TokenBlacklistStore for RedisBlacklistStore {
-    type Error = RedisBlacklistError;
-
-    async fn is_blacklisted(&self, jti: &str) -> Result<bool, Self::Error> {
-        let mut conn = self
-            .client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(RedisBlacklistError::Redis)?;
-
-        let exists: bool = conn
-            .exists(jti)
-            .await
-            .map_err(RedisBlacklistError::Redis)?;
-
-        Ok(exists)
-    }
-
-    async fn blacklist_token(
-        &self,
-        jti: &str,
-        expires_at: i64,
-    ) -> Result<bool, Self::Error> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        if expires_at <= now {
-            return Ok(true);
-        }
-
-        let ttl = (expires_at - now) as u64;
-
-        let mut conn = self
-            .client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(RedisBlacklistError::Redis)?;
-
-        let _: () = conn
-            .set_ex(jti, "1", ttl)
-            .await
-            .map_err(RedisBlacklistError::Redis)?;
-
-        Ok(true)
-    }
-}
-```
-
----
-
-## Using RedisBlacklistStore
-
-```rust
-pub type TestAuthService = AuthService<
-    TestStore,
-    DefaultHasher,
-    DefaultJwtManager,
-    RedisBlacklistStore,
-    MockEmailSender,
-    MockTemplates,
-    RedisOttStore,
->;
-
-pub fn build_test_auth() -> TestAuthService {
-    let client = redis::Client::open("redis://127.0.0.1/")
-        .expect("failed to connect to redis");
-
-    AuthService::builder()
-        .store(TestStore::new())
-        .hasher(DefaultHasher)
-        .tokens(DefaultJwtManager::new("secret"))
-        .blacklist(RedisBlacklistStore::new(client.clone()))
-        .email_sender(MockEmailSender)
-        .email_templates(MockTemplates)
-        .ott_store(RedisOttStore::new(client))
-        .build()
-}
-```
-
----
-
-## Custom Implementations
-
-You can provide your own blacklist backend by implementing `TokenBlacklistStore`.
-
-Common choices include:
-
-- Redis
-- PostgreSQL
-- MySQL
-- MongoDB
-- DynamoDB
-- In-memory `HashSet` (testing only)
-
----
+Make sure `blacklist_token` is atomic. Two simultaneous calls for the same token must not both return `true`.
 
 ## Summary
 
-- Refresh token rotation requires token blacklisting.
-- AuthBox includes a built-in `RedisBlacklistStore`.
-- Blacklisted tokens are automatically removed when they expire.
-- Custom blacklist backends can be implemented through `TokenBlacklistStore`.
-- Redis is the recommended choice for production deployments.
+* Rotation and logout depend on the blacklist.
+* Session revocation uses the same trait.
+* Use `RedisBlacklistStore` in production.

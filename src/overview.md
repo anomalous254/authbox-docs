@@ -1,53 +1,30 @@
 # authbox overview
 
-`authbox` is a lightweight, modular, async-first authentication framework for Rust.
+authbox is a lightweight, modular, async-first authentication framework for Rust.
 
-It provides a complete authentication workflow while remaining fully framework-agnostic and storage-agnostic. Every major component is trait-driven, allowing applications to integrate their own databases, token systems, email providers, and storage backends.
+It gives you a complete authentication workflow while staying independent of your database, cache, email service and web framework. Every major component is a trait, so you can use the included defaults or plug in your own.
 
-At the center of the library is `AuthService`, which orchestrates authentication operations such as registration, login, token refresh, email verification, password recovery and is token valid.
+At the center is `AuthService`. It handles registration, login, token refresh, email verification, password recovery, session revocation and account management.
 
 ---
 
-# Core Philosophy
-
-AuthBox follows three principles:
+# Core philosophy
 
 ## Modular
 
-Every authentication component is replaceable through traits.
+Every component is replaceable through a trait. Use PostgreSQL, MySQL, SQLite, MongoDB or anything else for users, and change it later without touching the authentication logic.
 
-You can use:
+## Async first
 
-- PostgreSQL
-- MySQL
-- SQLite
-- MongoDB
-- Redis
-- In-memory stores
-- Custom backends
+All operations are async and built for Tokio. Password hashing runs on blocking threads, so slow Argon2 work never stalls the runtime.
 
-without changing authentication logic.
+## Framework agnostic
 
-## Async First
-
-All operations are designed around Rust's async ecosystem and work seamlessly with Tokio.
-
-## Framework Agnostic
-
-AuthBox does not depend on:
-
-- Axum
-- Actix
-- Rocket
-- Warp
-
-This allows integration into any Rust application or service architecture.
+authbox does not depend on Axum, Actix, Rocket or Warp. It works in any Rust service.
 
 ---
 
 # Building an AuthService
-
-Authentication is configured using the builder API.
 
 ```rust
 let auth = AuthService::builder()
@@ -58,594 +35,210 @@ let auth = AuthService::builder()
     .email_sender(email_provider)
     .email_templates(email_templates)
     .ott_store(one_time_token_store)
-    .build();
+    .user_cache(user_cache)      // optional
+    .build()?;
 ```
 
-The builder assembles all authentication dependencies into a single `AuthService` instance.
+`build()` returns a `Result`, so a missing required component is reported at startup instead of at the first request.
+
+`AuthService` is a plain, non generic struct. It holds its components behind an `Arc`, so `.clone()` is cheap and it is safe to put in your application state.
 
 ---
 
-# AuthService Components
+# Components
 
-An `AuthService` consists of seven pluggable components:
-
-| Component | Responsibility |
-|------------|---------------|
-| `UserStore` | User persistence and retrieval |
-| `PasswordHasher` | Password hashing and verification |
-| `TokenManager` | Access and refresh token generation |
-| `TokenBlacklistStore` | Refresh token revocation |
-| `EmailProvider` | Sending authentication emails |
-| `EmailTemplateConfig` | Generating email content |
-| `OneTimeTokenStore` | Temporary token storage |
-
-```rust
-pub struct AuthService<S, P, T, B, E, M, V> {
-    pub store: S,
-    pub hasher: P,
-    pub tokens: T,
-    pub blacklist: B,
-    pub email_sender: E,
-    pub email_templates: M,
-    pub ott_store: V,
-}
-```
+| Component | Responsibility | Default |
+|---|---|---|
+| `UserStore` | User persistence and lookup | None |
+| `PasswordHasher` | Hash and verify passwords | `DefaultHasher` |
+| `TokenManager` | Create and verify access and refresh tokens | `DefaultJwtManager` |
+| `TokenBlacklistStore` | Token and session revocation | `RedisBlacklistStore` |
+| `OneTimeTokenStore` | Short lived verification and reset tokens | `RedisOttStore` |
+| `EmailProvider` | Send emails | Resend, SendGrid, SMTP |
+| `EmailTemplateConfig` | Email subjects and bodies | None |
+| `UserCache` (optional) | Cache user data for `me()` | `DefaultMemoryUserCache` |
 
 ---
 
-# Authentication Flow
-
-A typical authentication lifecycle looks like:
+# Authentication flow
 
 ```text
 Register
-   │
-   ▼
-Email Verification
-   │
-   ▼
+   |
+   v
+Email verification
+   |
+   v
 Login
-   │
-   ▼
-Access Token + Refresh Token
-   │
-   ▼
-Refresh Token Rotation
-   │
-   ▼
-Token Revocation
+   |
+   v
+Access token + refresh token
+   |
+   v
+Refresh (rotation)
+   |
+   v
+Logout, logout all, or session revocation
 ```
 
-Password recovery is available at any point through the password reset flow.
+Password recovery is available at any point.
 
 ---
 
 # AuthService API
 
-After creating an `AuthService`, the following authentication operations become available.
+Every method returns `Result<_, AuthError>`. See [Error Handling](errors.md) for the full list.
 
-## register()
-
-Creates a new user account.
+## register
 
 ```rust
 pub async fn register(
-    &mut self,
-    input: S::RegisterDto,
-) ->  Result<S::User, AuthError<S::Error, T::Error, B::Error>>
-
-```
-
-### What happens internally?
-
-1. Check email if exists
-2. Password is hashed.
-3. User is persisted through `UserStore`.
-4. A email verification token is generated.
-5. The token is stored in `OneTimeTokenStore`.
-6. A verification email is generated.
-7. The email is sent through `EmailProvider`.
-8. The created user is returned.
-
-### Flow
-
-```text
-Register Request
-        │
-        ▼
-Check if email already exists
-        │--- email exists --> EmailAlreadyExists  Error
-        ▼
-Hash Password
-        │
-        ▼
-Create User
-        │
-        ▼
-Generate Verification Token
-        │
-        ▼
-Store Token
-        │
-        ▼
-Send Verification Email
-        │
-        ▼
-Return User
-```
-
----
-
-## login()
-
-Authenticates a user and issues tokens.
-
-```rust
-pub async fn login(
     &self,
-    email: &str,
-    password: &str,
-) -> Result<T::Token, LoginError<T::Error, S::Error>>
+    input: &dyn RegisterUserInput,
+) -> Result<Box<dyn AuthUser>, AuthError>
 ```
 
-### Validation Steps
+Creates a new account and sends a verification email.
 
-1. Find user by email.
-2. Verify email has been confirmed.
-3. Verify password hash.
-4. Generate authentication tokens.
+1. Check the password length (12 to 128 characters).
+2. Check whether the email already exists.
+3. Hash the password.
+4. Create the user through `UserStore`.
+5. Store a verification token (valid for 24 hours).
+6. Send the verification email.
 
-### Possible Errors
+If storing the token or sending the email fails, the user is deleted again so you never end up with an account that cannot be verified.
+
+> The email check in step 2 is only a fast path. Two signups at the same moment can both pass it, so your database needs a UNIQUE index on the email column. See [Implementing a User Store](user-store.md).
+
+## verify_email
 
 ```rust
-pub enum LoginError<T, S> {
-    InvalidCredentials,
-    EmailNotVerified,
-    Store(S),
-    Token(T),
-}
+pub async fn verify_email(&self, token: &str) -> Result<(), AuthError>
 ```
 
-### Login Flow
+Marks the email as verified. The token is claimed with an atomic `take`, so two simultaneous requests cannot both use it. If a temporary failure happens after the claim, the token is put back so the user can try again.
 
-```text
-Find User
-    │
-    ▼
-Email Verified?
-    │
-    ├── No → EmailNotVerified
-    │
-    ▼
-Verify Password
-    │
-    ├── Invalid → InvalidCredentials
-    │
-    ▼
-Generate Tokens
-    │
-    ▼
-Return Tokens
-```
-
----
-
-## logout()
-
-
-Invalidate your refresh token and log the user out.
-
+## login
 
 ```rust
- pub async fn logout(
-        &self,
-        refresh_token: &str,
-    ) -> Result<(), AuthError<(), T::Error, B::Error, ()>>
-
+pub async fn login(&self, email: &str, password: &str) -> Result<TokenPair, AuthError>
 ```
 
-### What happens internally?
+1. Find the user by email.
+2. Verify the password.
+3. Check that the email is verified.
+4. Generate a token pair.
 
-1. Verify refresh token.
-2. Extract token claims.
-3. Blacklist current refresh token.
+A password hash is verified even for unknown emails, so response times do not reveal which accounts exist. The password is checked before the verification status is revealed.
 
-
-### Refresh Flow
-
-```text
-Verify Refresh Token
-          │
-          ▼
-Check Blacklist
-          │
-          ├── Blacklisted
-          │         │
-          │         ▼
-          │   BlacklistedToken
-          │
-          ▼
-Blacklist Current Token
-          │
-          ▼
-Generate New Tokens
-          │
-          ▼
-Return New Token Pair
-```
-
----
-
-## refresh_token()
-
-Rotates a refresh token and issues a new token pair.
+## me
 
 ```rust
-pub async fn refresh_token(
+pub async fn me(&self, access_token: &str) -> Result<Me, AuthError>
+```
+
+Returns the current user. The token is always validated. Only the user data is cached. See [Configuring the User Cache](user-cache.md).
+
+## refresh_token
+
+```rust
+pub async fn refresh_token(&self, refresh_token: &str) -> Result<TokenPair, AuthError>
+```
+
+Rotates a refresh token. The token is validated, blacklisted, and exchanged for a new pair. A token can only be rotated once.
+
+## logout
+
+```rust
+pub async fn logout(&self, refresh_token: &str) -> Result<(), AuthError>
+```
+
+Blacklists a refresh token. Safe to call more than once.
+
+## logout_all
+
+```rust
+pub async fn logout_all(&self, user_id: &str) -> Result<(), AuthError>
+```
+
+Voids every session issued so far for a user. See [Sessions and Revocation](sessions.md).
+
+## request_password_reset
+
+```rust
+pub async fn request_password_reset(&self, email: &str) -> Result<(), AuthError>
+```
+
+Sends a reset email. Returns `Ok(())` for unknown emails so the endpoint cannot be used to discover accounts.
+
+## reset_password
+
+```rust
+pub async fn reset_password(&self, token: &str, new_password: &str) -> Result<(), AuthError>
+```
+
+Sets a new password from a reset token and revokes every existing session.
+
+## change_password
+
+```rust
+pub async fn change_password(
     &self,
-    refresh_token: &str,
-) -> Result<T::Token, AuthError<(), T::Error, B::Error>>
+    user_id: &str,
+    old_password: &str,
+    new_password: &str,
+) -> Result<(), AuthError>
 ```
 
-### What happens internally?
+Changes the password for a logged in user and revokes every existing session.
 
-1. Verify refresh token.
-2. Extract token claims.
-3. Check blacklist.
-4. Blacklist current refresh token.
-5. Generate new token pair.
-
-
-### Possible Errors
-
+## delete_account
 
 ```rust
-
-pub enum AuthError<S, T, B> {
-    Store(S),
-    Token(T),
-    Blacklist(B),
-
-    BlacklistedToken,
-    EmailAlreadyExists,
-
-    NotFound,
-    InvalidToken,
-    EmailAlreadyVerified,
-}
-
-
+pub async fn delete_account(&self, user_id: &str, password: &str) -> Result<(), AuthError>
 ```
 
-### Refresh Flow
+Permanently deletes the account after re-checking the password.
 
-```text
-Verify Refresh Token
-          │
-          ▼
-Check Blacklist
-          │
-          ├── Blacklisted
-          │         │
-          │         ▼
-          │   BlacklistedToken
-          │
-          ▼
-Blacklist Current Token
-          │
-          ▼
-Generate New Tokens
-          │
-          ▼
-Return New Token Pair
+## is_token_valid
+
+```rust
+pub async fn is_token_valid(&self, token: &str) -> Result<Claims, AuthError>
 ```
+
+Validates an access token and returns its claims. Use it in your authentication middleware. Only access tokens pass. Refresh tokens are rejected.
+
+## invalidate_user_cache
+
+```rust
+pub async fn invalidate_user_cache(&self, user_id: &str) -> Result<(), AuthError>
+```
+
+Clears the cached user entry. Call it when you change user data outside of authbox.
 
 ---
 
-## verify_email()
+# Security features
 
-Marks a user's email address as verified.
-
-```rust
-pub async fn verify_email(&self, token: &str) -> Result<(), AuthError<S::Error, (), ()>>
-```
-
-### What happens internally?
-
-1. Lookup token in `OneTimeTokenStore`.
-2. Find associated user.
-3. Mark email as verified.
-4. Persist updated user.
-5. Remove verification token.
-
-### Flow
-
-```text
-Verification Token
-         │
-         ▼
-Find User
-         │
-         ▼
-Set Email Verified
-         │
-         ▼
-Update User
-         │
-         ▼
-Delete Token
-```
-
-
-## Possible Errors
-```rust
-AuthError::InvalidToken
-AuthError::NotFound
-AuthError::Store
-AuthError::EmailAlreadyVerified
-```
-
+* Argon2 password hashing on blocking threads
+* Email verification before login
+* Refresh token rotation with blacklisting
+* Session revocation on password reset, password change, account deletion and logout all
+* Atomic one-time tokens that cannot be used twice
+* Separate token namespaces, so verification and reset tokens cannot be swapped
+* Timing safe login for unknown emails
+* Reset requests that never reveal whether an email exists
+* Password length limits (12 to 128 characters)
+* Emails trimmed and lowercased before lookup
 
 ---
 
-## request_password_reset()
+# Next steps
 
-Starts the password reset process.
-
-```rust
-  pub async fn request_password_reset(
-        &self,
-        email: &str,
-    ) -> Result<(), AuthError<S::Error, (), (), V::Error>>
-```
-
-### What happens internally?
-
-1. Find user by email.
-2. Generate reset token.
-3. Store token in `OneTimeTokenStore`.
-4. Generate reset email.
-5. Send email.
-
-### Flow
-
-```text
-Find User
-    │
-    ▼
-Generate Reset Token
-    │
-    ▼
-Store Token
-    │
-    ▼
-Send Reset Email
-```
-
----
-
-## reset_password()
-
-Updates a user's password using a reset token.
-
-```rust
-  pub async fn reset_password(
-        &self,
-        token: &str,
-        new_password: &str,
-    ) -> Result<(), AuthError<S::Error, (), ()>>
-)
-```
-
-### What happens internally?
-
-1. Validate reset token.
-2. Find associated user.
-3. Hash new password.
-4. Update stored password hash.
-5. Delete reset token.
-
-### Flow
-
-```text
-Validate Reset Token
-          │
-          ▼
-Find User
-          │
-          ▼
-Hash New Password
-          │
-          ▼
-Update User
-          │
-          ▼
-Delete Token
-```
-
-
-## Possible Errors
-```rust
-AuthError::InvalidToken
-AuthError::NotFound
-AuthError::Store
-```
-
----
-
-## is_token_valid()
-
- Checks if access token is valid
-
-> 
->  `is_token_valid()` should be used in your authentication middlewares to verify access token
-
-```rust
-   pub async fn is_token_valid(
-        &self,
-        token: &str,
-    ) -> Result<T::Claims, AuthError<(), T::Error, B::Error>>
-```
-
-### What happens internally?
-
-1. Validate access  token.
-2. Check token if blaclisted
-3. Returns token claims
-
-### Flow
-
-```text
-Validate Access Token
-          │
-          ▼
-Check  token blacklisted
-          │
-          ▼
-Returns token claims
-```
-
-
-## Possible Errors
-```rust
-AuthError::Token
-AuthError::Blacklist
-AuthError::BlacklistedToken
-```
-
----
-
-# Error Types
-
-## LoginError
-
-Returned by `login()`.
-
-```rust
-pub enum LoginError<T, S> {
-    InvalidCredentials,
-    EmailNotVerified,
-    Store(S),
-    Token(T),
-}
-```
-
-| Variant | Description |
-|----------|-------------|
-| `InvalidCredentials` | Email or password is incorrect |
-| `EmailNotVerified` | User has not verified their email |
-| `Store(S)` | Storage layer failure |
-| `Token(T)` | Token generation failure |
-
----
-
-## AuthError
-
-Returned by `refresh_token()`.
-
-```rust
-#[derive(Debug)]
-pub enum AuthError<S, T, B, O> {
-    Store(S),
-    Token(T),
-    Blacklist(B),
-    Ott(O),
-
-    BlacklistedToken,
-    EmailAlreadyExists,
-
-    NotFound,
-    InvalidToken,
-    EmailAlreadyVerified,
-}
-```
-
-| Variant | Description |
-|----------|-------------|
-| `Token(T)` | Token verification or refresh failure |
-| `Blacklist(B)` | Blacklist store failure |
-| `Ott(O)` | One Time Token store failure |
-| `BlacklistedToken` | Refresh token has already been revoked |
-| `Store(S)` | Database store implementation erros |
-| `EmailAlreadyExists` | Email already exists |
-| `NotFound` | User not found |
-| `InvalidToken` | OTT  for blacklists has already been revoked |
-| `EmailAlreadyVerified` | User email already verified |
----
-
-# Security Features
-
-AuthBox includes several security mechanisms by default:
-
-- Password hashing through `PasswordHasher`
-- Email verification before login
-- Refresh token rotation
-- Refresh token revocation
-- One-time token workflows
-- Password reset protection
-- Token blacklisting support
-- Stateless JWT authentication
-
----
-
-# Extensibility
-
-Every authentication subsystem is trait-based.
-
-You can provide custom implementations for:
-
-- User storage
-- Password hashing
-- Token generation
-- Email delivery
-- Email templates
-- Refresh token revocation
-- One-time token storage
-
-This allows AuthBox to adapt to virtually any application architecture while keeping authentication logic centralized in `AuthService`.
-
----
-
-# Architecture Overview
-
-```text
-                ┌─────────────────┐
-                │   AuthService   │
-                └────────┬────────┘
-                         │
-      ┌──────────────────┼──────────────────┐
-      │                  │                  │
-      ▼                  ▼                  ▼
-
- UserStore      PasswordHasher      TokenManager
-      │
-      ▼
-
-OneTimeTokenStore
-
-      │
-      ▼
-
-EmailProvider
-      +
-EmailTemplateConfig
-
-      │
-      ▼
-
-TokenBlacklistStore
-```
-
----
-
-# Next Steps
-
-Continue with:
-
-1. Creating a User Model
-2. Implementing UserStore
-3. Configuring JWT Authentication
-4. Email Verification
-5. Password Reset Flow
-6. Refresh Token Rotation
-7. Production Deployment
+1. [Creating a Registration DTO](registration-dto.md)
+2. [Creating a User Type](user-model.md)
+3. [Implementing a User Store](user-store.md)
+4. [Building the Auth Service](auth-service.md)
+5. [Actix Web Integration](actix-web.md)
+6. [Production Deployment](production.md)

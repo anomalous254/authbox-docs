@@ -1,82 +1,62 @@
 # Custom Storage Backends
 
-AuthBox uses the `UserStore` trait to abstract all persistence logic.
-
-This allows integration with any database or storage system.
+authbox keeps all persistence behind the `UserStore` trait. That means you can use any database or storage system.
 
 ---
 
-## Supported Backends
+## Supported backends
 
-You can implement storage using:
+* PostgreSQL
+* MySQL
+* SQLite
+* MongoDB
+* Redis
+* REST APIs
+* gRPC services
+* In-memory storage (tests)
 
-- PostgreSQL
-- MySQL
-- SQLite
-- MongoDB
-- Redis
-- REST APIs
-- gRPC services
-- In-memory storage
-
-## UserStore Trait
+## The trait
 
 ```rust
 #[async_trait]
-pub trait UserStore {
-    type Error;
-    type User: AuthUser;
-    type RegisterDto: RegisterUserInput;
-
-    async fn find_by_id(&self, user_id: &str) -> Option<Self::User>;
-
-    async fn find_by_email(&self, email: &str) -> Option<Self::User>;
-
+pub trait UserStore: Send + Sync {
+    async fn find_by_id(&self, user_id: &str) -> Result<Option<Box<dyn AuthUser>>, BoxError>;
+    async fn find_by_email(&self, email: &str) -> Result<Option<Box<dyn AuthUser>>, BoxError>;
     async fn create_user(
         &self,
-        input: Self::RegisterDto,
-        password_hash: String,
-    ) -> Result<Self::User, Self::Error>;
-
-    async fn update_user(
-        &self,
-        user: Self::User,
-    ) -> Result<Self::User, Self::Error>;
-
-    async fn delete_user(
-        &self,
-        user_id: &str,
-    ) -> Result<(), Self::Error>;
-
-    async fn  check_email_verified(
-        &self,
-        user_id: &str,
-    ) -> Result<bool, Self::Error>;
+        input: &dyn RegisterUserInput,
+        pass_hash: String,
+    ) -> Result<Box<dyn AuthUser>, BoxError>;
+    async fn update_user(&self, user: Box<dyn AuthUser>) -> Result<Box<dyn AuthUser>, BoxError>;
+    async fn delete_user(&self, user_id: &str) -> Result<(), BoxError>;
+    async fn check_email_verified(&self, user_id: &str) -> Result<bool, BoxError>;
 }
 ```
 
+The full method by method guide, with an example, is in [Implementing a User Store](user-store.md).
 
-## Implementation Guidelines
+## Guidelines
 
-When implementing a custom store:
+* Make the store thread safe (`Arc`, connection pools and so on).
+* Avoid blocking calls inside async methods.
+* Return `Ok(None)` for a missing user, and keep `Err` for real failures.
+* Put a UNIQUE index on the normalized email column.
+* Report a unique violation from `create_user` as `AuthError::EmailAlreadyExists`.
+* In `update_user`, merge the core fields into the stored record instead of replacing it, so your custom fields survive.
+* Make `delete_user` succeed when the user is already gone.
 
-- Ensure thread safety (`Arc`, connection pools, etc.)
-- Avoid blocking operations inside async methods
-- Handle errors using your backend’s error type
-- Keep queries efficient and indexed
-- Ensure email lookup is fast (commonly indexed)
+## Other storage in authbox
 
+The user store is not the only pluggable storage. Each of these can also be replaced:
 
-# Example Use Cases
+| Trait | Default | Chapter |
+|---|---|---|
+| `TokenBlacklistStore` | `RedisBlacklistStore` | [Token blacklisting](token-blacklist.md) |
+| `OneTimeTokenStore` | `RedisOttStore` | [One-time tokens](ott-store.md) |
+| `UserCache` | `DefaultMemoryUserCache` | [User cache](user-cache.md) |
 
-- SQL-backed authentication system
-- Multi-tenant user storage
-- Microservice-based auth backend
-- High-performance cache layer (Redis)
+## Example use cases
 
-
-## Key Benefit
-
-AuthBox does not dictate your database.
-
-You control persistence entirely.
+* SQL backed authentication
+* Multi-tenant user storage
+* A microservice that fronts your user database

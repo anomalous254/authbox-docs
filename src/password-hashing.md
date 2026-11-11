@@ -1,85 +1,56 @@
 # Configuring Password Hashing
 
-AuthBox handles password hashing through the `PasswordHasher` trait.
-
-Passwords are **never stored in plaintext**. During registration, AuthBox hashes the user's password before persisting it, and during login it verifies the provided password against the stored hash.
+authbox hashes passwords through the `PasswordHasher` trait. Passwords are never stored in plain text. They are hashed on registration, on reset and on change, and checked against the stored hash on login.
 
 ---
 
-## PasswordHasher Trait
-
-To support different hashing algorithms, AuthBox defines the following trait:
+## The trait
 
 ```rust
-pub trait PasswordHasher {
+pub trait PasswordHasher: Send + Sync {
     fn hash(&self, password: &str) -> String;
     fn verify(&self, password: &str, hash: &str) -> bool;
 }
 ```
 
-- `hash` generates a secure hash of the password.
-- `verify` checks a password against a stored hash.
+The methods are synchronous. authbox runs them on Tokio's blocking thread pool, so a slow hash never blocks your async runtime.
 
-
-## Built-in Hasher
-
-AuthBox ships with a default Argon2 implementation.
+## Built-in hasher
 
 ```rust
 let hasher = DefaultHasher;
 ```
 
-- This is ready to use out of the box.
-- Handles salt generation, hashing, and verification.
+`DefaultHasher` uses Argon2. It creates a salt for every password and handles hashing and verification for you.
 
+## Password length
 
-## Registration Flow
+authbox accepts passwords between 12 and 128 characters. This is checked in `register`, `reset_password` and `change_password` before any hashing happens. The upper limit keeps very long inputs from turning into a denial of service.
 
-During user registration:
+## Login timing
 
-```rust
-let hash = self.hasher.hash(input.password());
-```
+When the email is unknown, `login` still verifies the password against a dummy hash created at startup. Every login attempt costs one hash verification, so timing does not reveal which emails are registered.
 
-The resulting `hash` is stored in your `UserStore` instead of the plaintext password.
-
-
- ## Login Flow
-
-During login:
-
-```rust
-let valid = self.hasher.verify(password, user.password_hash());
-```
-
-Authentication only proceeds if `valid` is `true`.
-
-
-## Using a Custom Hasher
-
-You can implement your own password hashing strategy by implementing the `PasswordHasher` trait:
+## Using a custom hasher
 
 ```rust
 pub struct MyHasher;
 
 impl PasswordHasher for MyHasher {
     fn hash(&self, password: &str) -> String {
-        // custom hashing logic
+        // your hashing logic
     }
 
     fn verify(&self, password: &str, hash: &str) -> bool {
-        // custom verification logic
+        // your verification logic
     }
 }
 ```
 
-You can then configure AuthBox to use your hasher instead of the default.
-
----
+Pass it to the builder with `.hasher(MyHasher)`. Use a slow, salted algorithm such as Argon2, scrypt or bcrypt.
 
 ## Summary
 
-- **Default option**: Use `DefaultHasher` (Argon2) — simple and secure.
-- **Custom option**: Implement your own `PasswordHasher` for Bcrypt, Scrypt, HSM-backed hashing, or any custom algorithm.
-
-AuthBox works with **any** implementation of `PasswordHasher`, giving you flexibility without changing the core authentication logic.
+* Use `DefaultHasher` for a secure default.
+* Implement `PasswordHasher` for another algorithm.
+* Hashing runs on blocking threads and never stalls async code.

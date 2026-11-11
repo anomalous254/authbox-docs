@@ -1,41 +1,44 @@
 # Custom User Types
 
-AuthBox is fully generic over user models, allowing you to define your own domain-specific user structure.
+authbox works with any user model you define, as long as it implements `AuthUser`. It does not care about the rest of your fields.
 
 ---
 
-## AuthUser Trait
-
-All user types must implement the `AuthUser` trait. This ensures AuthBox can:
-
-- Identify users
-- Perform authentication lookups
-- Manage passwords
-- Track email verification status
+## AuthUser
 
 ```rust
-/// Full Auth user model contract
-pub trait AuthUser {
+pub trait AuthUser: Send + Sync {
     fn id(&self) -> String;
     fn email(&self) -> &str;
     fn password_hash(&self) -> &str;
     fn is_email_verified(&self) -> bool;
     fn set_email_verified(&mut self, verified: bool);
     fn set_password_hash(&mut self, hash: String);
+
+    /// Extra public fields for the `me()` response.
+    fn extra(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 ```
 
+This is how authbox can:
 
-## Create Your User Type
+* identify users
+* check passwords
+* change passwords
+* track email verification
+* include your public fields in `me()`
 
-Your user model must implement the `AuthUser` trait. You can also add custom fields as needed.
+## Create your user type
 
 ```rust
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct YourUserModelType {
     // Required fields
     pub id: String,
     pub email: String,
+    #[serde(skip_serializing)]
     pub password_hash: String,
     pub is_email_verified: bool,
 
@@ -71,82 +74,33 @@ impl AuthUser for YourUserModelType {
     fn set_password_hash(&mut self, hash: String) {
         self.password_hash = hash;
     }
+
+    fn extra(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(self).ok()
+    }
 }
 ```
 
-## Custom Registration DTO
+`#[serde(skip_serializing)]` on the hash keeps it out of `extra()`, and so out of `me()` and the user cache.
 
-You can define your own registration input structure to match your application's needs.
+## Custom registration DTO
 
-
-### RegisterUserInput Trait
-
-AuthBox only requires two core fields for registration:
-
-- Email
-- Password
-
-These are accessed through the `RegisterUserInput` trait.
+AuthBox only needs an email and a password at signup. Everything else is yours.
 
 ```rust
-pub trait RegisterUserInput {
+pub trait RegisterUserInput: Send + Sync {
     fn email(&self) -> &str;
     fn password(&self) -> &str;
+    fn as_any(&self) -> &dyn Any;
 }
 ```
 
+Implement it for your DTO, and downcast with `as_any` inside your `UserStore::create_user` to read the custom fields. A full example is in [Creating a Registration DTO](registration-dto.md).
 
-### Example DTO
+## Key points
 
-You can extend the registration payload with any custom fields you need.
-
-```rust
-#[derive(Clone, Debug)]
-pub struct SignUpUserPayload {
-    // Required fields
-    pub email: String,
-    pub password: String,
-
-    // Custom fields
-    pub username: Option<String>,
-    pub phone: Option<String>,
-    pub country: Option<String>,
-    pub city: Option<String>,
-    pub age: Option<u32>,
-}
-```
-
-
-### Implement RegisterUserInput
-
-Only the required fields are exposed to AuthBox.
-
-```rust
-impl RegisterUserInput for SignUpUserPayload {
-    fn email(&self) -> &str {
-        &self.email
-    }
-
-    fn password(&self) -> &str {
-        &self.password
-    }
-}
-```
-
-
-## Key Points
-
-- AuthBox only depends on **email** and **password**
-- You are free to add any extra fields for your domain
-- Extra fields are passed through to your `UserStore` implementation
-- Keeps authentication core simple and flexible
-
-## Key Benefits
-
-By implementing your own user type, you fully control:
-
-- User structure
-- Registration fields
-- Domain-specific metadata
-
-AuthBox only requires minimal traits to function, making it highly flexible.
+* authbox depends only on email and password for registration.
+* Add any extra fields you need.
+* Extra fields reach your `UserStore`, where you save them.
+* `update_user` only carries the core fields, so merge them into the stored record.
+* Never put secrets in `extra()`. It is returned to clients and cached.

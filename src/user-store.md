@@ -1,352 +1,157 @@
 # Implementing a User Store
 
-The `UserStore` trait is responsible for user persistence.
-
-AuthBox delegates all user-related database operations to this trait, allowing you to integrate any storage backend while keeping the authentication layer storage-agnostic.
+`UserStore` is the one component you always write yourself. authbox never talks to your database directly. It calls this trait, so you can use any database, ORM or driver.
 
 ---
 
-# Responsibilities
-
-A user store implementation must support:
-
-- Finding users by ID
-- Finding users by email
-- Creating users
-- Updating users
-- Deleting users
-- Checking email verification status
-
-
-# Trait Overview
+## The trait
 
 ```rust
 #[async_trait]
-pub trait UserStore {
-    type Error;
-    type User: AuthUser;
-    type RegisterDto: RegisterUserInput;
-
-    async fn find_by_id(
-        &self,
-        user_id: &str,
-    ) -> Option<Self::User>;
-
-    async fn find_by_email(
-        &self,
-        email: &str,
-    ) -> Option<Self::User>;
-
+pub trait UserStore: Send + Sync {
+    async fn find_by_id(&self, user_id: &str) -> Result<Option<Box<dyn AuthUser>>, BoxError>;
+    async fn find_by_email(&self, email: &str) -> Result<Option<Box<dyn AuthUser>>, BoxError>;
     async fn create_user(
         &self,
-        input: Self::RegisterDto,
-        password_hash: String,
-    ) -> Result<Self::User, Self::Error>;
-
-    async fn update_user(
-        &self,
-        user: Self::User,
-    ) -> Result<Self::User, Self::Error>;
-
-    async fn delete_user(
-        &self,
-        user_id: &str,
-    ) -> Result<(), Self::Error>;
-
-    async fn check_email_verified(
-        &self,
-        user_id: &str,
-    ) -> Result<bool, Self::Error>;
+        input: &dyn RegisterUserInput,
+        pass_hash: String,
+    ) -> Result<Box<dyn AuthUser>, BoxError>;
+    async fn update_user(&self, user: Box<dyn AuthUser>) -> Result<Box<dyn AuthUser>, BoxError>;
+    async fn delete_user(&self, user_id: &str) -> Result<(), BoxError>;
+    async fn check_email_verified(&self, user_id: &str) -> Result<bool, BoxError>;
 }
 ```
 
+There are no associated types. Methods return `Box<dyn AuthUser>` and errors are a plain `BoxError`, so your store can use `sqlx::Error`, `diesel` errors or your own type and convert with `?` or `.into()`.
 
-# Associated Types
+## Methods
 
-## `User`
+**`find_by_id`** returns `Ok(Some(user))` when found and `Ok(None)` when the user does not exist. Reserve `Err` for real backend failures.
 
-The user model used by AuthBox.
+**`find_by_email`** works the same way. authbox passes an email that is already trimmed and lowercased.
 
-This type must implement the `AuthUser` trait.
+**`create_user`** receives the registration input and the already hashed password. Read your custom fields by downcasting the input with `as_any` (see [Creating a Registration DTO](registration-dto.md)).
 
-```rust
-type User: AuthUser;
-```
+**`update_user`** receives the changed user. authbox uses it to set the verified flag and to change the password hash. It only has the core `AuthUser` fields, so merge those into your stored record instead of replacing the whole record. Otherwise custom fields like `username` could be lost.
 
-## `RegisterDto`
+**`delete_user`** removes the user. Deleting a user that is already gone should still succeed, because authbox also calls it to roll back a failed registration.
 
-The input type used when registering a new user.
+**`check_email_verified`** returns whether the user has verified their email.
 
-This type must implement the `RegisterUserInput` trait.
+## Unique emails
 
-```rust
-type RegisterDto: RegisterUserInput;
-```
+The `find_by_email` check inside `register` is only a fast path. Two signups at the same moment can both pass it. To make duplicates impossible:
 
-## `Error`
+1. Put a UNIQUE index on the normalized email column in your database.
+2. Make `create_user` report a unique violation as `AuthError::EmailAlreadyExists`.
 
-The error type returned by your storage backend.
+authbox maps store errors in `map_store_create_err`. By default it recognizes an `AuthError::EmailAlreadyExists` wrapped in the `BoxError`. So the simplest approach is to return that from your store:
 
 ```rust
-type Error;
+// inside create_user, for sqlx + Postgres
+if let Err(e) = result {
+    if let Some(db) = e.as_database_error() {
+        if db.is_unique_violation() {
+            return Err(Box::new(AuthError::EmailAlreadyExists));
+        }
+    }
+    return Err(Box::new(e));
+}
 ```
 
-This can be:
+Store the normalized email (trimmed and lowercased) yourself. authbox only normalizes emails for lookups.
 
-- `sqlx::Error`
-- `mongodb::error::Error`
-- `diesel::result::Error`
-- A custom application error type
-- Any other backend-specific error
+## Example: in-memory store
 
-
-# Supported Backends
-
-AuthBox does not require a specific database.
-
-You can use any storage backend, including:
-
-- PostgreSQL
-- MySQL
-- SQLite
-- MongoDB
-- Redis
-- In-memory stores
-- REST APIs
-- gRPC services
-- Custom storage layers
-
-
-# Required Methods
-
-## `find_by_id`
-
-Finds a user by their unique identifier.
-
-```rust
-async fn find_by_id(
-    &self,
-    user_id: &str,
-) -> Option<Self::User>;
-```
-
-Returns:
-
-- `Some(user)` if found
-- `None` if the user does not exist
-
-## `find_by_email`
-
-Finds a user by email address.
-
-```rust
-async fn find_by_email(
-    &self,
-    email: &str,
-) -> Option<Self::User>;
-```
-
-Returns:
-
-- `Some(user)` if found
-- `None` if the user does not exist
-
-
-## `create_user`
-
-Creates a new user record.
-
-```rust
-async fn create_user(
-    &self,
-    input: Self::RegisterDto,
-    password_hash: String,
-) -> Result<Self::User, Self::Error>;
-```
-
-Parameters:
-
-- `input` — Registration data
-- `password_hash` — Already-hashed password generated by AuthBox
-
-Returns the newly created user.
-
-
-## `update_user`
-
-Updates an existing user.
-
-```rust
-async fn update_user(
-    &self,
-    user: Self::User,
-) -> Result<Self::User, Self::Error>;
-```
-
-Returns the updated user.
-
-
-## `delete_user`
-
-Deletes a user from storage.
-
-```rust
-async fn delete_user(
-    &self,
-    user_id: &str,
-) -> Result<(), Self::Error>;
-```
-
-Returns:
-
-```rust
-Ok(())
-```
-
-when the operation succeeds.
-
-
-## `check_email_verified`
-
-Checks whether a user has verified their email address.
-
-```rust
-async fn check_email_verified(
-    &self,
-    user_id: &str,
-) -> Result<bool, Self::Error>;
-```
-
-Returns:
-
-- `Ok(true)` if verified
-- `Ok(false)` if not verified
-- `Err(_)` if the backend operation fails
-
-
-# Example: In-Memory User Store
-
-The following example demonstrates a simple in-memory implementation using a `HashMap`.
+This is the store used in the test fixtures. It is useful for tests and for learning the trait.
 
 ```rust
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use uuid::Uuid;
 
-#[derive(Clone)]
-pub struct UserStoreImpl {
-    pub users: Arc<Mutex<HashMap<String, User>>>,
-}
-
-impl UserStoreImpl {
-    pub fn new() -> Self {
-        Self {
-            users: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
+#[derive(Clone, Default)]
+pub struct TestStore {
+    pub users: Arc<Mutex<HashMap<String, TestUser>>>,
 }
 
 #[async_trait]
-impl UserStore for UserStoreImpl {
-    type Error = String;
-    type User = User;
-
-    // Custom registration DTO
-    type RegisterDto = RegisterDto;
-
-    async fn find_by_id(
-        &self,
-        user_id: &str,
-    ) -> Option<User> {
-        let users = self.users.lock().unwrap();
-
-        users.get(user_id).cloned()
+impl UserStore for TestStore {
+    async fn find_by_id(&self, user_id: &str) -> Result<Option<Box<dyn AuthUser>>, BoxError> {
+        Ok(self.users.lock().unwrap().get(user_id).cloned().map(boxed))
     }
 
-    async fn find_by_email(
-        &self,
-        email: &str,
-    ) -> Option<User> {
+    async fn find_by_email(&self, email: &str) -> Result<Option<Box<dyn AuthUser>>, BoxError> {
         let users = self.users.lock().unwrap();
-
-        users
-            .values()
-            .find(|u| u.email == email)
-            .cloned()
+        Ok(users.values().find(|u| u.email == email).cloned().map(boxed))
     }
 
     async fn create_user(
         &self,
-        input: RegisterDto,
-        password_hash: String,
-    ) -> Result<User, Self::Error> {
+        input: &dyn RegisterUserInput,
+        pass_hash: String,
+    ) -> Result<Box<dyn AuthUser>, BoxError> {
+        let email = input.email().trim().to_lowercase();
+        let dto = input.as_any().downcast_ref::<RegisterDto>();
+
+        // duplicate check and insert share one lock, like a UNIQUE index would
         let mut users = self.users.lock().unwrap();
+        if users.values().any(|u| u.email == email) {
+            return Err("unique violation".into());
+        }
 
-        let user = User {
-            id: input.email.clone(),
-            email: input.email,
-            password_hash,
+        let user = TestUser {
+            id: Uuid::new_v4().to_string(),
+            email,
+            password_hash: pass_hash,
             is_email_verified: false,
-
-            username: input.username,
-            phone: input.phone,
-            country: input.country,
-            city: input.city,
-            age: input.age,
+            username: dto.and_then(|d| d.username.clone()),
+            phone: dto.and_then(|d| d.phone.clone()),
+            country: dto.and_then(|d| d.country.clone()),
+            city: dto.and_then(|d| d.city.clone()),
+            age: dto.and_then(|d| d.age),
         };
 
         users.insert(user.id.clone(), user.clone());
-
-        Ok(user)
+        Ok(boxed(user))
     }
 
-    async fn update_user(
-        &self,
-        user: User,
-    ) -> Result<User, Self::Error> {
+    async fn update_user(&self, user: Box<dyn AuthUser>) -> Result<Box<dyn AuthUser>, BoxError> {
         let mut users = self.users.lock().unwrap();
+        let existing = users.get_mut(&user.id()).ok_or("user not found")?;
 
-        users.insert(user.id.clone(), user.clone());
+        // merge the core fields so username, phone etc. survive
+        existing.email = user.email().to_owned();
+        existing.password_hash = user.password_hash().to_owned();
+        existing.is_email_verified = user.is_email_verified();
 
-        Ok(user)
+        Ok(boxed(existing.clone()))
     }
 
-    async fn delete_user(
-        &self,
-        user_id: &str,
-    ) -> Result<(), Self::Error> {
-        let mut users = self.users.lock().unwrap();
-
-        users.remove(user_id);
-
+    async fn delete_user(&self, user_id: &str) -> Result<(), BoxError> {
+        self.users.lock().unwrap().remove(user_id);
         Ok(())
     }
 
-    async fn check_email_verified(
-        &self,
-        user_id: &str,
-    ) -> Result<bool, Self::Error> {
-        let users = self.users.lock().unwrap();
-
-        Ok(
-            users
-                .get(user_id)
-                .map(|u| u.is_email_verified)
-                .unwrap_or(false)
-        )
+    async fn check_email_verified(&self, user_id: &str) -> Result<bool, BoxError> {
+        match self.users.lock().unwrap().get(user_id) {
+            Some(user) => Ok(user.is_email_verified),
+            None => Err("user not found".into()),
+        }
     }
+}
+
+fn boxed(u: TestUser) -> Box<dyn AuthUser> {
+    Box::new(u)
 }
 ```
 
+Clones of `TestStore` share the same map. A test can hand one copy to the builder and keep another to inspect the data afterwards.
 
 ## Notes
 
-- AuthBox never directly interacts with your database.
-- All user persistence is handled through the `UserStore` trait.
-- You are free to use any ORM, query builder, or database driver.
-- The store implementation should be thread-safe if used in a concurrent environment.
-- Password hashing is performed by AuthBox before `create_user` is called.
-- `update_user` should persist any modifications made to a user record.
-- `is_email_verified` is used internally to determine whether a user has completed email verification.
-
-By implementing `UserStore`, AuthBox can operate on top of virtually any persistence layer without requiring database-specific integrations.
+* Make the store thread safe. Use `Arc`, connection pools or similar.
+* Do not block inside async methods.
+* Index the email column so lookups stay fast.
+* Password hashing is done by authbox before `create_user` is called.

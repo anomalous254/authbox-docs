@@ -1,25 +1,15 @@
-# Configuring One-Time Token Storage
+# Configuring One-Time Tokens
 
-AuthBox uses a one-time token store for temporary authentication tokens used in verification and recovery workflows.
-
-These tokens are short-lived and automatically expire after a configured TTL.
+authbox uses a one-time token (OTT) store for the short lived tokens in email verification and password reset. Tokens expire after a set time and can only be used once.
 
 ---
 
-## Used By
+## Where they are used
 
-One-time tokens are used for:
-
-- Email verification
-- Password reset
-- Magic links
-- One-time authentication flows
-
----
+* Email verification (valid for 24 hours)
+* Password reset (valid for 15 minutes)
 
 ## Built-in RedisOttStore
-
-AuthBox ships with a built-in Redis implementation of `OneTimeTokenStore`.
 
 ```rust
 let client = redis::Client::open("redis://127.0.0.1/")?;
@@ -27,245 +17,51 @@ let client = redis::Client::open("redis://127.0.0.1/")?;
 let ott_store = RedisOttStore::new(client);
 ```
 
-### Why Redis?
+Unlike the blacklist store, `RedisOttStore::new` is not async.
 
-- Production-ready
-- Native TTL support
-- Automatic token expiration
-- Works across multiple application instances
-- No manual cleanup required
+Why Redis:
 
-AuthBox stores one-time tokens in Redis with an expiration time, and Redis automatically removes them when the TTL expires.
+* Native TTL support
+* Tokens expire automatically
+* Shared across application instances
+* No manual cleanup
 
----
-
-## OneTimeTokenStore Trait
+## The trait
 
 ```rust
-use async_trait::async_trait;
-
 #[async_trait]
-pub trait OneTimeTokenStore {
-    type Error;
-
-    async fn set(
-        &self,
-        key: &str,
-        value: &str,
-        ttl_seconds: u64,
-    ) -> Result<(), Self::Error>;
-
-    async fn get(
-        &self,
-        key: &str,
-    ) -> Result<Option<String>, Self::Error>;
-
-    async fn delete(
-        &self,
-        key: &str,
-    ) -> Result<(), Self::Error>;
+pub trait OneTimeTokenStore: Send + Sync {
+    async fn set(&self, key: &str, value: &str, ttl_seconds: u64) -> Result<(), BoxError>;
+    async fn get(&self, key: &str) -> Result<Option<String>, BoxError>;
+    async fn delete(&self, key: &str) -> Result<(), BoxError>;
+    async fn take(&self, key: &str) -> Result<Option<String>, BoxError>;
 }
 ```
 
----
+**`set`** stores a value with a time to live.
 
-## Methods
+**`get`** reads a value without removing it.
 
-### `set`
+**`delete`** removes a value.
 
-Stores a token value with a time-to-live.
+**`take`** reads and deletes a value in one atomic step. This is the important one. `verify_email` and `reset_password` use it, so two simultaneous requests with the same token cannot both succeed. Only one of them gets `Some(..)`.
 
-```rust
-store
-    .set(
-        key,
-        value,
-        ttl_seconds,
-    )
-    .await?;
-```
+If you write your own store, `take` must be truly atomic. In Redis that means `GETDEL`, or a small Lua script. A separate `get` followed by `delete` is not safe.
 
-### `get`
+## Key format
 
-Retrieves a stored token.
+authbox prefixes every key with its purpose, like `verify:<token>` or `reset:<token>`. A verification token can never be used as a reset token, or the other way around.
 
-```rust
-let value = store.get(key).await?;
-```
+## Failure handling
 
-### `delete`
+If a temporary failure happens after `verify_email` has claimed a token, authbox puts the token back with `set`, so the user can click the link again. If the token was spent for a permanent reason (the email is already verified, or the user no longer exists), it stays spent.
 
-Removes a token from storage.
+## Custom implementations
 
-```rust
-store.delete(key).await?;
-```
-
----
-
-## Token Lifetimes
-
-AuthBox uses different expiration periods depending on the workflow.
-
-### Email Verification
-
-```rust
-60 * 60 * 24
-```
-
-24 hours.
-
-### Password Reset
-
-```rust
-60 * 15
-```
-
-15 minutes.
-
-You may configure different expiration times depending on your application's requirements.
-
----
-
-## Default Redis Implementation
-
-AuthBox includes the following Redis-backed implementation:
-
-```rust
-use async_trait::async_trait;
-use authbox_core::traits::OneTimeTokenStore;
-use redis::AsyncCommands;
-
-#[derive(Clone)]
-pub struct RedisOttStore {
-    pub client: redis::Client,
-}
-
-impl RedisOttStore {
-    pub fn new(client: redis::Client) -> Self {
-        Self { client }
-    }
-}
-
-#[async_trait]
-impl OneTimeTokenStore for RedisOttStore {
-    type Error = redis::RedisError;
-
-    async fn set(
-        &self,
-        key: &str,
-        value: &str,
-        ttl_seconds: u64,
-    ) -> Result<(), Self::Error> {
-        let mut conn = self
-            .client
-            .get_multiplexed_async_connection()
-            .await?;
-
-        conn.set_ex::<_, _, ()>(
-            key,
-            value,
-            ttl_seconds,
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-    ) -> Result<Option<String>, Self::Error> {
-        let mut conn = self
-            .client
-            .get_multiplexed_async_connection()
-            .await?;
-
-        let value: Option<String> =
-            conn.get(key).await?;
-
-        Ok(value)
-    }
-
-    async fn delete(
-        &self,
-        key: &str,
-    ) -> Result<(), Self::Error> {
-        let mut conn = self
-            .client
-            .get_multiplexed_async_connection()
-            .await?;
-
-        conn.del::<_, ()>(key).await?;
-
-        Ok(())
-    }
-}
-```
-
----
-
-## Using RedisOttStore
-
-```rust
-pub type TestAuthService = AuthService<
-    TestStore,
-    DefaultHasher,
-    DefaultJwtManager,
-    RedisBlacklistStore,
-    MockEmailSender,
-    MockTemplates,
-    RedisOttStore,
->;
-
-pub fn build_test_auth() -> TestAuthService {
-    let client = redis::Client::open(
-        "redis://127.0.0.1/"
-    )
-    .expect("failed to connect to redis");
-
-    AuthService::builder()
-        .store(TestStore::new())
-        .hasher(DefaultHasher)
-        .tokens(DefaultJwtManager::new("secret"))
-        .blacklist(
-            RedisBlacklistStore::new(
-                client.clone(),
-            ),
-        )
-        .email_sender(MockEmailSender)
-        .email_templates(MockTemplates)
-        .ott_store(
-            RedisOttStore::new(client),
-        )
-        .build()
-}
-```
-
----
-
-## Custom Implementations
-
-You can provide your own token storage backend by implementing `OneTimeTokenStore`.
-
-Common choices include:
-
-- Redis
-- KeyDB
-- Memcached
-- PostgreSQL
-- MySQL
-- MongoDB
-- DynamoDB
-- In-memory `HashMap` (testing only)
-
----
+Implement `OneTimeTokenStore` to use KeyDB, Memcached, PostgreSQL, MongoDB or DynamoDB. An in-memory map works for tests only.
 
 ## Summary
 
-- AuthBox requires a `OneTimeTokenStore` for temporary authentication tokens.
-- AuthBox includes a built-in `RedisOttStore`.
-- Tokens automatically expire using Redis TTL support.
-- Used for email verification, password reset, magic links, and similar flows.
-- Custom storage backends can be implemented through `OneTimeTokenStore`.
-- Redis is the recommended choice for production deployments.
+* The OTT store holds verification and reset tokens.
+* `take` makes each token single use.
+* `RedisOttStore` is the recommended production choice.

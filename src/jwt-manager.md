@@ -1,105 +1,72 @@
 # Configuring JWT Tokens
 
-AuthBox handles token generation, verification, and refresh through the `TokenManager` trait.
-
-You can use the built-in JWT implementation `DefaultJwtManager` or provide your own custom token strategy.
+authbox creates and verifies tokens through the `TokenManager` trait. Use the built-in `DefaultJwtManager` or write your own.
 
 ---
 
-## TokenManager Trait
+## The trait
 
 ```rust
-use async_trait::async_trait;
-
 #[async_trait]
-pub trait TokenManager {
-    type Token;
-    type Claims;
-    type Error;
+pub trait TokenManager: Send + Sync {
+    async fn generate(&self, user_id: &str) -> Result<TokenPair, BoxError>;
+    async fn verify(&self, token: &str) -> Result<Claims, BoxError>;
 
-    async fn generate(&self, user_id: &str) -> Result<Self::Token, Self::Error>;
-    async fn verify(&self, token: &str) -> Result<Self::Claims, Self::Error>;
-    async fn refresh(&self, refresh_token: &str) -> Result<Self::Token, Self::Error>;
+    /// How long a refresh token lives, in seconds.
+    fn refresh_ttl_secs(&self) -> u64;
 }
 ```
 
-**Responsibilities of a token manager:**
+Responsibilities:
 
-- Generate tokens
-- Verify tokens
-- Refresh tokens
+* `generate` creates an access token and a refresh token for a user.
+* `verify` checks a token's signature and expiry and returns its claims.
+* `refresh_ttl_secs` reports the refresh token lifetime. It must equal `exp - iat` of the refresh tokens you create. authbox uses it to decide how long a "sessions revoked" note must be kept. See [Sessions and Revocation](sessions.md).
 
+There is no `refresh` method. Rotation is handled by `AuthService::refresh_token`, which verifies and blacklists the old token and then calls `generate`.
 
-## Built-in JWT Manager
-
-AuthBox provides a default JWT manager:
+## Built-in JWT manager
 
 ```rust
-let tokens = DefaultJwtManager::new("super-secret-key");
+let tokens = DefaultJwtManager::new("a-secret-at-least-32-bytes-long!!", None, None)?;
 ```
 
-- Generates **access** and **refresh** tokens
-- Access tokens expire after 15 minutes
-- Refresh tokens expire after 1 day
-- Tokens use the standard `Bearer` type
-- Supports token blacklisting
+* The first argument is your signing secret. Use a long random value, at least 32 bytes.
+* The two optional arguments set the access token and refresh token lifetimes. Pass `None` to keep the defaults.
+* `new` returns a `Result`, so a bad secret is caught at startup.
 
+Load the secret from an environment variable or a secret manager. Never commit it.
 
-## Login Flow
+## Token types
 
-After successful authentication:
+Every token carries a type, either access or refresh.
+
+* `is_token_valid` accepts access tokens only.
+* `refresh_token` and `logout` accept refresh tokens only.
+
+Handing a refresh token to your middleware, or an access token to the refresh endpoint, fails with `InvalidToken`.
+
+## Types
 
 ```rust
-let auth_tokens = token_manager.generate(&user.id()).await?;
-```
-
-Returned tokens:
-
-```rust
-pub struct AuthTokens {
+pub struct TokenPair {
     pub access_token: String,
     pub refresh_token: String,
-    pub access_expires_at: i64,
-    pub token_type: String,
+    // plus expiry details
 }
 ```
 
+`Claims` is what `is_token_valid` returns. The fields you will use most:
 
-## Refresh Flow
+| Field | Meaning |
+|---|---|
+| `sub` | The user id |
+| `iat` | Issued at, in unix seconds |
+| `typ` | The token type (access or refresh) |
+| `jti()` | Unique token id, used for blacklisting |
+| `exp()` | Expiry time in unix seconds |
 
-Refreshing tokens:
-
-```rust
-token_manager.verify(refresh_token).await?;
-token_manager.refresh(refresh_token).await?;
-```
-
-- Verifies the refresh token
-- Returns a new set of access and refresh tokens
-
-
-## Claims Type
-
-Each `TokenManager` defines a claims type:
-
-```rust
-type Claims;
-```
-
-The built-in JWT manager uses:
-
-```rust
-pub struct JwtClaims {
-    pub sub: String,
-    pub exp: i64,
-    pub jti: String,
-    pub token_type: TokenType,
-}
-```
-
-## Blacklist Support
-
-To use AuthBox’s token blacklist, your claims type **must implement** `BlacklistableClaims`:
+`jti()` and `exp()` come from the `BlacklistableClaims` trait:
 
 ```rust
 pub trait BlacklistableClaims {
@@ -108,60 +75,23 @@ pub trait BlacklistableClaims {
 }
 ```
 
-The built-in claims already implement it:
-
-```rust
-impl BlacklistableClaims for JwtClaims {
-    fn jti(&self) -> &str {
-        &self.jti
-    }
-
-    fn exp(&self) -> i64 {
-        self.exp
-    }
-}
-```
-
-- `jti()` identifies the token uniquely
-- `exp()` determines when it can be removed from the blacklist
-
----
-
-
-
-## Using a Custom Token Manager
-
-You can implement your own:
+## Using a custom token manager
 
 ```rust
 pub struct MyTokenManager;
 
 #[async_trait]
 impl TokenManager for MyTokenManager {
-    type Token = AuthTokens;
-    type Claims = MyClaims;
-    type Error = MyError;
-
-    async fn generate(&self, user_id: &str) -> Result<Self::Token, Self::Error> { todo!() }
-    async fn verify(&self, token: &str) -> Result<Self::Claims, Self::Error> { todo!() }
-    async fn refresh(&self, refresh_token: &str) -> Result<Self::Token, Self::Error> { todo!() }
+    async fn generate(&self, user_id: &str) -> Result<TokenPair, BoxError> { todo!() }
+    async fn verify(&self, token: &str) -> Result<Claims, BoxError> { todo!() }
+    fn refresh_ttl_secs(&self) -> u64 { 60 * 60 * 24 }
 }
 ```
 
-If you want blacklist support, implement `BlacklistableClaims` on your claims type:
-
-```rust
-impl BlacklistableClaims for MyClaims {
-    fn jti(&self) -> &str { &self.jti }
-    fn exp(&self) -> i64 { self.exp }
-}
-```
-
----
+Your tokens must include a unique `jti`, an `iat` in seconds, an `exp` and the token type, because blacklisting and session revocation depend on them.
 
 ## Summary
 
-- **Default option:** `DefaultJwtManager` for standard JWT tokens.
-- **Custom option:** Implement `TokenManager` for any token strategy.
-- **Blacklist support:** Claims must implement `BlacklistableClaims`.
-- Fully flexible and backend-agnostic.
+* Use `DefaultJwtManager` for standard JWTs.
+* Implement `TokenManager` for any other token format.
+* Keep `refresh_ttl_secs` in sync with your refresh token lifetime.

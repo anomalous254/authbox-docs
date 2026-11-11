@@ -1,46 +1,53 @@
 # Architecture
 
-AuthBox is designed as a **modular, trait-driven authentication framework** where every core responsibility is abstracted behind a pluggable interface.
+authbox is a trait driven authentication framework. Every core job sits behind a small interface, and `AuthService` ties them together.
 
----
+## Crates
 
-## Core Design Principles
+The repository is a workspace of small crates.
 
-- **Separation of concerns** – authentication logic is separated from storage, email, and token handling
-- **Dependency injection** – everything is composed via `AuthService::builder()`
-- **Backend agnostic** – works with any database or external service
-- **Testability** – all components can be mocked or replaced
-- **Zero hard dependencies** – no required database, email provider, or token system
+| Crate | Purpose |
+|---|---|
+| `authbox` | The main crate. Re-exports everything through `authbox::prelude` |
+| `authbox-core` | Traits, types, errors and the `AuthService` engine |
+| `authbox-jwt` | `DefaultJwtManager`, the JWT access and refresh token provider |
+| `authbox-argon2` | `DefaultHasher`, Argon2 password hashing |
+| `authbox-redis` | `RedisBlacklistStore` and `RedisOttStore` |
+| `authbox-cache` | `DefaultMemoryUserCache`, an in-memory user cache built on moka |
+| `authbox-email` | `ResendEmailProvider`, `SendGridEmailProvider` and `SmtpEmailProvider` |
 
+## Design principles
 
-## High-Level Flow
+* **Separation of concerns.** Authentication logic is kept apart from storage, email and token handling.
+* **Dependency injection.** Everything is composed through `AuthService::builder()`.
+* **Backend agnostic.** Use any database, cache, email service or web framework.
+* **Testable.** Every component can be replaced with a mock or in-memory version.
+* **Cheap to share.** `AuthService` wraps its parts in an `Arc`, so cloning it is inexpensive.
 
-A typical authentication request flows through these layers:
+## Components
 
-1. `AuthService` receives request
-2. Calls `PasswordHasher` (login/register)
-3. Uses `UserStore` for persistence
-4. Uses `TokenManager` for JWT generation
-5. Uses `EmailProvider` + `EmailTemplateConfig` for email flows
-6. Uses `OneTimeTokenStore` for temporary tokens
-7. Uses `TokenBlacklistStore` for refresh rotation & logout
+| Layer | Trait | Default |
+|---|---|---|
+| Users | `UserStore` | None, you implement it |
+| Passwords | `PasswordHasher` | `DefaultHasher` |
+| Sessions | `TokenManager` | `DefaultJwtManager` |
+| Revocation | `TokenBlacklistStore` | `RedisBlacklistStore` |
+| Temporary tokens | `OneTimeTokenStore` | `RedisOttStore` |
+| Caching (optional) | `UserCache` | `DefaultMemoryUserCache` |
+| Delivery | `EmailProvider` | Resend, SendGrid, SMTP |
+| Content | `EmailTemplateConfig` | None, you implement it |
 
+## Request flow
 
-## Component Architecture
+1. Your web framework receives a request and calls a method on `AuthService`.
+2. `AuthService` uses `PasswordHasher` for hashing and checking passwords.
+3. It uses `UserStore` to read and write users.
+4. It uses `TokenManager` to create and verify JWTs.
+5. It uses `TokenBlacklistStore` to revoke refresh tokens and whole sessions.
+6. It uses `OneTimeTokenStore` for verification and reset tokens.
+7. It uses `EmailProvider` and `EmailTemplateConfig` to send emails.
+8. If configured, it uses `UserCache` to speed up `me()`.
 
-AuthBox is built from interchangeable components:
+## Key idea
 
-- User layer → `UserStore`
-- Security layer → `PasswordHasher`
-- Session layer → `TokenManager`
-- Revocation layer → `TokenBlacklistStore`
-- Communication layer → `EmailProvider`
-- Template layer → `EmailTemplateConfig`
-- Temporary state layer → `OneTimeTokenStore`
-
-
-## Key Insight
-
-AuthBox does **not implement authentication directly**.
-
-Instead, it orchestrates a set of independent components to build a complete authentication system.
+authbox does not hard code how users are stored or how emails are sent. It runs the security rules and calls your components to do the actual work.
